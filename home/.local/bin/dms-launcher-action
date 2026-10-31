@@ -1,0 +1,247 @@
+#!/usr/bin/python3
+"""Extra right-click / Right-arrow actions for the DMS launcher.
+
+    dms-launcher-action menu file PATH
+    dms-launcher-action menu app DESKTOP_ID [WM_CLASS] [EXEC]
+    dms-launcher-action do ACTION ARGS...
+
+`menu` prints JSON that LauncherExtraActions.qml (installed by
+dms-launcher-patch) turns into menu entries: the apps registered for a
+file's MIME type, whether it is text / an archive, the folder's git remote,
+or an app's open windows and the current workspaces. `do` carries out one
+action. Lives in $HOME so it survives dms updates; /usr/bin/python3 on
+purpose -- Homebrew's python3 has no `gi`.
+"""
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shutil
+import signal
+import subprocess
+import sys
+import urllib.parse
+
+HOME = os.path.expanduser("~")
+ARCHIVE_EXT = (".zip", ".tar", ".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tbz2",
+               ".tar.zst", ".tzst", ".7z", ".rar", ".gz", ".xz", ".bz2", ".zst", ".jar", ".deb", ".rpm", ".iso")
+TEXT_MIME_EXTRA = ("application/json", "application/xml", "application/javascript",
+                   "application/x-shellscript", "application/x-desktop", "application/toml",
+                   "application/x-yaml", "application/sql", "inode/x-empty")
+COPY_MAX = 5 * 1024 * 1024
+
+
+def app_details():
+    """dms-app-details as a module (window matching + process tree)."""
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "dms-app-details")
+    loader = importlib.machinery.SourceFileLoader("dms_app_details", path)
+    spec = importlib.util.spec_from_loader("dms_app_details", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def run(args, timeout=3, cwd=None):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout, cwd=cwd).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def spawn(args, cwd=None):
+    subprocess.Popen(args, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def notify(summary, body=""):
+    spawn(["notify-send", "-a", "Launcher", "-i", "system-search", summary, body])
+
+
+def mime_of(path):
+    return run(["file", "-b", "--mime-type", "--", path])
+
+
+def is_text(mime):
+    return mime.startswith("text/") or mime in TEXT_MIME_EXTRA
+
+
+def is_archive(path):
+    low = path.lower()
+    return any(low.endswith(e) for e in ARCHIVE_EXT)
+
+
+def git_info(path):
+    d = path if os.path.isdir(path) else os.path.dirname(path)
+    top = run(["git", "-C", d, "rev-parse", "--show-toplevel"])
+    if not top:
+        return None
+    remote = run(["git", "-C", d, "remote", "get-url", "origin"])
+    if not remote:
+        names = run(["git", "-C", d, "remote"]).split()
+        remote = run(["git", "-C", d, "remote", "get-url", names[0]]) if names else ""
+    return {"top": top, "branch": run(["git", "-C", d, "branch", "--show-current"]),
+            "remote": remote, "web": web_url(remote)}
+
+
+def web_url(remote):
+    """git@github.com:me/x.git / ssh://git@host:22/me/x / https://... -> https://host/me/x"""
+    r = remote.strip()
+    if not r:
+        return ""
+    m = re.match(r"^[\w.-]+@([\w.-]+):(?!\d+/)(.+)$", r)
+    if m:
+        host, path = m.groups()
+    else:
+        m = re.match(r"^(?:ssh|git|https?)://(?:[^@/]+@)?([\w.-]+)(?::\d+)?/(.+)$", r)
+        if not m:
+            return ""
+        host, path = m.groups()
+    path = re.sub(r"\.git/?$", "", path)
+    return f"https://{host}/{path}"
+
+
+def open_with(path):
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio
+    except (ImportError, ValueError):
+        return []
+    ctype = Gio.content_type_guess(path, None)[0] if not os.path.isdir(path) else "inode/directory"
+    return open_with_type(ctype)
+
+
+def open_with_type(ctype):
+    try:
+        import gi
+        gi.require_version("Gio", "2.0")
+        from gi.repository import Gio
+    except (ImportError, ValueError):
+        return []
+    default = Gio.AppInfo.get_default_for_type(ctype, False)
+    out, seen = [], set()
+    apps = ([default] if default else []) + list(Gio.AppInfo.get_all_for_type(ctype))
+    for a in apps:
+        aid = a.get_id() or ""
+        if not aid or aid in seen or not a.should_show():
+            continue
+        seen.add(aid)
+        out.append({"id": aid, "name": a.get_display_name() or a.get_name(), "default": a is default})
+    return out
+
+
+def menu_file(path):
+    res = {"path": path, "isDir": os.path.isdir(path)}
+    if res["isDir"]:
+        res["git"] = git_info(path)
+        return res
+    mime = mime_of(path)
+    res["mime"] = mime
+    res["text"] = is_text(mime) and os.path.getsize(path) <= COPY_MAX
+    res["archive"] = is_archive(path)
+    res["openWith"] = open_with(path)
+    return res
+
+
+def menu_app(did, wmclass, exec_line):
+    mod = app_details()
+    hits = mod.find_desktop(did)
+    wins = mod.windows(did, wmclass, exec_line)
+    try:
+        ws = json.loads(run(["hyprctl", "workspaces", "-j"]) or "[]")
+    except ValueError:
+        ws = []
+    ws = sorted(({"id": w.get("id"), "name": str(w.get("name", "")), "windows": w.get("windows", 0)}
+                 for w in ws if isinstance(w.get("id"), int) and w["id"] > 0), key=lambda w: w["id"])
+    pids = sorted({w["pid"] for w in wins if w.get("pid")})
+    return {"desktop": hits[0] if hits else "", "windows": wins, "workspaces": ws,
+            "processes": len(mod.tree(pids)) if pids else 0}
+
+
+def tmux_name(path):
+    return re.sub(r"[.:\s]+", "_", os.path.basename(path.rstrip("/")) or "root")
+
+
+def do(action, args):
+    a = args + [""] * 3
+    p = a[0]
+    if action == "show-in-files":
+        spawn(["nautilus", "--select", p])
+    elif action == "vscode":
+        spawn(["code", p])
+    elif action == "open-with":
+        # args: DESKTOP_ID PATH
+        spawn(["gtk-launch", a[0], a[1]])
+    elif action == "edit":
+        # The default text editor, NOT xdg-open: opening a .desktop file
+        # that way can run the app instead of showing its source.
+        apps = open_with_type("text/plain")
+        if apps:
+            spawn(["gtk-launch", apps[0]["id"], p])
+    elif action == "copy-file":
+        uri = "file://" + urllib.parse.quote(p)
+        subprocess.run(["wl-copy", "-t", "text/uri-list"], input=uri + "\r\n", text=True)
+        notify("File copied", os.path.basename(p))
+    elif action == "copy-contents":
+        if os.path.getsize(p) > COPY_MAX:
+            notify("Not copied", "File is larger than 5 MB")
+            return
+        with open(p, "rb") as f:
+            subprocess.run(["wl-copy", "-t", "text/plain;charset=utf-8"], stdin=f)
+        notify("Contents copied", os.path.basename(p))
+    elif action == "trash":
+        if subprocess.run(["gio", "trash", "--", p]).returncode == 0:
+            notify("Moved to Trash", p.replace(HOME, "~", 1))
+        else:
+            notify("Could not move to Trash", p.replace(HOME, "~", 1))
+    elif action == "extract":
+        spawn(["file-roller", "--extract-here", p])
+    elif action == "tmux":
+        spawn(["xdg-terminal-exec", "tmux", "new-session", "-A", "-s", tmux_name(p), "-c", p])
+    elif action == "git-web":
+        g = git_info(p)
+        if g and g["web"]:
+            spawn(["xdg-open", g["web"]])
+    elif action == "focus":
+        run(["hyprctl", "dispatch", "focuswindow", "address:" + p])
+    elif action in ("quit", "force-quit"):
+        # args: DESKTOP_ID WM_CLASS EXEC
+        mod = app_details()
+        wins = mod.windows(a[0], a[1], a[2])
+        if action == "quit":
+            for w in wins:
+                if w.get("address"):
+                    run(["hyprctl", "dispatch", "closewindow", "address:" + w["address"]])
+            return
+        procs = mod.tree(sorted({w["pid"] for w in wins if w.get("pid")}))
+        procs.discard(os.getpid())
+        for pid in procs:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        notify("Force quit", f"Killed {len(procs)} processes")
+    elif action == "workspace":
+        run(["hyprctl", "dispatch", "workspace", p])
+    else:
+        print(f"unknown action: {action}", file=sys.stderr)
+        sys.exit(2)
+
+
+def main():
+    argv = sys.argv[1:]
+    if len(argv) >= 3 and argv[0] == "menu" and argv[1] == "file":
+        print(json.dumps(menu_file(argv[2]) if os.path.exists(argv[2]) else {}))
+    elif len(argv) >= 3 and argv[0] == "menu" and argv[1] == "app":
+        rest = argv[2:] + ["", ""]
+        print(json.dumps(menu_app(rest[0], rest[1], rest[2])))
+    elif len(argv) >= 2 and argv[0] == "do":
+        do(argv[1], argv[2:])
+    else:
+        print(__doc__, file=sys.stderr)
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()

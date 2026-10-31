@@ -1,0 +1,14 @@
+[Unit]
+Description=Regenerate Hyprland/Waybar colours when the desktop accent changes
+PartOf=graphical-session.target
+After=graphical-session.target
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/hypr-accent-watch
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

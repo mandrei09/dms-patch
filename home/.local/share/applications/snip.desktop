@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=Snipping Tool
+GenericName=Screenshot
+Comment=Screenshot tool: snip a region, window or the whole screen, mark it up, or copy its text (Super+Shift+S)
+# Opens the snip overlay (~/.config/quickshell/snip, snip.service). The short
+# delay lets the launcher close first, so it is not frozen into the snip.
+Exec=sh -c "sleep 0.4; exec qs -c snip ipc call snip open"
+# Absolute path, not a theme name: DMS caches icon lookups and showed it blank.
+Icon=/usr/share/icons/Yaru/256x256@2x/apps/screenshot-app.png
+Terminal=false
+Categories=Graphics;
+Keywords=screenshot;snip;snipping;capture;screen;ocr;text;print screen;
+StartupNotify=false

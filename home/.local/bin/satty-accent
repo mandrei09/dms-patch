@@ -1,0 +1,16 @@
+#!/bin/sh
+# satty-accent -- lead Satty's pen palette with the DMS accent.
+# Rewrites the generated [color-palette] block of ~/.config/satty/config.toml.
+# Satty's own UI follows ~/.config/gtk-4.0/gtk.css (gtk-accent). Called from
+# hypr-accent.
+set -eu
+cfg="$HOME/.config/satty/config.toml"
+[ -f "$cfg" ] || exit 0
+accent=$("$HOME/.local/bin/accent-resolve.py" --print)
+sed -i '/^# BEGIN satty-accent/,/^# END satty-accent/d' "$cfg"
+cat >> "$cfg" <<TOML
+# BEGIN satty-accent (generated; edits are lost)
+[color-palette]
+palette = ["$accent", "#ff3b30", "#ff9500", "#ffcc00", "#34c759", "#007aff", "#000000", "#ffffff"]
+# END satty-accent
+TOML

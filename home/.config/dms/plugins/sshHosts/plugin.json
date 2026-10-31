@@ -1,0 +1,14 @@
+{
+    "id": "sshHosts",
+    "name": "SSH Hosts",
+    "description": "SSH to the hosts in ~/.ssh/config (Includes followed, resolved with ssh -G), most recently used first. Type any user@host to connect to something not in the config.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "terminal",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./SshHosts.qml",
+    "trigger": "ssh",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "settings_write", "process"]
+}

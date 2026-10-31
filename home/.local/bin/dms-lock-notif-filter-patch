@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Show only important notifications on the DMS lock screen.
+
+Stock DMS lists every notification in the center on the lock screen, so
+flameshot, starship, clipboard runners and the like crowd out the ones that
+matter. Nearly every app sends "normal" urgency, so urgency alone can't tell
+them apart -- this is an allowlist instead:
+
+  - critical-urgency notifications always show;
+  - anything else shows only if its app name or desktop entry contains a line
+    from ~/.config/dms/lock-notifications-allow (case-insensitive,
+    one pattern per line, '#' comments). The file is watched, edits apply live.
+
+A missing/empty file means critical only. The notification center and popups
+are untouched; this filters only what the lock screen shows.
+
+See ~/.local/bin/dms-shell-sync for why patches go into $DMS_SHELL_DIR rather
+than /usr/share.
+
+Usage: dms-lock-notif-filter-patch [shell-dir]  (default: ~/.local/share/dms-shell)
+Idempotent: exit 10 means it was already in place.
+"""
+
+import os
+import sys
+
+SHELL_DIR = (sys.argv[1] if len(sys.argv) > 1
+             else os.path.expanduser("~/.local/share/dms-shell"))
+# DMS 2.0 made the lock screen widget-based; notifications are now their own
+# widget, which reads NotificationService.groupedNotifications directly.
+TARGET = os.path.join(SHELL_DIR, "Modules/Lock/Widgets/LockNotificationsWidget.qml")
+
+MARKER = "dms-lock-notif-filter-patch"
+
+IMPORT_OLD = "import QtQuick\nimport Quickshell.Widgets\n"
+IMPORT_NEW = "import QtQuick\nimport Quickshell.Io\nimport Quickshell.Widgets\n"
+
+OLD = '''    readonly property var notifications: NotificationService.groupedNotifications
+'''
+
+NEW = '''    // Local patch (~/.local/bin/dms-lock-notif-filter-patch): only critical
+    // notifications plus allowlisted apps reach the lock screen.
+    readonly property var allowPatterns: lockAllowFile.text().split("\\n")
+        .map(l => l.replace(/#.*/, "").trim().toLowerCase())
+        .filter(l => l !== "")
+    function lockAllowed(n) {
+        if (!n)
+            return false;
+        if (n.urgency === 2) // NotificationUrgency.Critical
+            return true;
+        const app = (n.appName || "").toLowerCase();
+        const entry = (n.desktopEntry || "").toLowerCase();
+        return allowPatterns.some(p => app.includes(p) || entry.includes(p));
+    }
+    readonly property var notifications: {
+        const out = [];
+        for (const group of NotificationService.groupedNotifications) {
+            const kept = (group.notifications || []).filter(n => lockAllowed(n));
+            if (kept.length === 0)
+                continue;
+            out.push(Object.assign({}, group, {
+                "notifications": kept,
+                "latestNotification": kept[0],
+                "count": kept.length
+            }));
+        }
+        return out;
+    }
+
+    FileView {
+        id: lockAllowFile
+        path: Paths.stringify(Paths.config).replace(/^file:\\/\\//, "") + "/lock-notifications-allow"
+        watchChanges: true
+        printErrors: false
+        onFileChanged: reload()
+    }
+'''
+
+
+def main():
+    with open(TARGET) as f:
+        src = f.read()
+    if MARKER in src:
+        return 10
+    if src.count(OLD) != 1 or src.count(IMPORT_OLD) != 1:
+        print(f"{MARKER}: anchor not found in {TARGET} (DMS changed upstream?)",
+              file=sys.stderr)
+        return 1
+    with open(TARGET, "w") as f:
+        f.write(src.replace(OLD, NEW).replace(IMPORT_OLD, IMPORT_NEW))
+    print(f"{MARKER}: patched {TARGET}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

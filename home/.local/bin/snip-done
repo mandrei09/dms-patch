@@ -1,0 +1,52 @@
+#!/bin/sh
+# snip-done -- the file side of the snip overlay (~/.config/quickshell/snip).
+#   snip-done save FILE   copy the image to the clipboard, move it to
+#                         ~/Pictures/Screenshots, print the saved path
+#   snip-done edit FILE   open it in Satty (Ctrl+S saves over FILE)
+#   snip-done text FILE [rm]
+#                         OCR it, copy the text, show what was copied
+set -u
+cmd=$1 f=$2
+[ -s "$f" ] || exit 1
+
+ocr() {
+    # Screen text is small; 2x upscale makes Tesseract far more accurate.
+    /usr/bin/python3 -I - "$1" "$1.ocr.png" <<'PY'
+import sys, cairo
+s = cairo.ImageSurface.create_from_png(sys.argv[1])
+d = cairo.ImageSurface(cairo.FORMAT_RGB24, s.get_width() * 2, s.get_height() * 2)
+c = cairo.Context(d); c.set_source_rgb(1, 1, 1); c.paint()
+c.scale(2, 2); c.set_source_surface(s); c.get_source().set_filter(cairo.FILTER_BEST); c.paint()
+d.write_to_png(sys.argv[2])
+PY
+    tesseract "$1.ocr.png" - -l eng+ron --psm 6 2>/dev/null | sed -e 's/[[:space:]]*$//' | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}'
+    rm -f "$1.ocr.png"
+}
+
+case $cmd in
+save)
+    dir="$HOME/Pictures/Screenshots"
+    mkdir -p "$dir"
+    saved="$dir/Screenshot_$(date +%Y-%m-%d_%H-%M-%S).png"
+    mv "$f" "$saved"
+    wl-copy --type image/png <"$saved"
+    printf '%s\n' "$saved"
+    ;;
+edit)
+    exec satty --filename "$f" --output-filename "$f"
+    ;;
+text)
+    text=$(ocr "$f")
+    [ "${3:-}" = rm ] && rm -f "$f"
+    if [ -z "$text" ]; then
+        notify-send -a "Snipping Tool" -i edit-copy "No text found" "Nothing readable in that snip"
+        exit 0
+    fi
+    printf %s "$text" | wl-copy
+    preview=$(printf %s "$text" | head -c 300 | sed -e 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g')
+    notify-send -a "Snipping Tool" -i edit-copy "Text copied to clipboard" "$preview"
+    ;;
+*)
+    exit 2
+    ;;
+esac

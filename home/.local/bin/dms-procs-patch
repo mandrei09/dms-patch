@@ -1,0 +1,58 @@
+#!/usr/bin/env python3
+"""Make the DMS process list see every process, not the top 100 by CPU.
+
+Stock DgopService asks the backend for `limit: 100, sort: "cpu"` and then
+re-sorts that slice on the client. Sorting by Memory therefore only ranks the
+100 busiest processes: an idle process holding lots of RAM (a pile of MSBuild
+reuse nodes, a parked language server) never makes the cut, and the search box
+cannot find it either, since ProcessesView filters the same slice. Measured on
+2026-09-27: the stock request covered 6.9 GB of ~30 GB in use; `limit: 0`
+returns all ~640 processes (32 GB) for the same 0.3 s of dgop time.
+
+The request is only made while a process popout/widget holds a ref, so the
+larger payload (~200 KB vs ~40 KB) costs nothing when nothing is watching.
+
+See ~/.local/bin/dms-shell-sync for why patches go into $DMS_SHELL_DIR rather
+than /usr/share.
+
+Usage: dms-procs-patch [shell-dir]     (default: ~/.local/share/dms-shell)
+Idempotent: exit 10 means it was already in place.
+"""
+
+import os
+import sys
+
+SHELL_DIR = (sys.argv[1] if len(sys.argv) > 1
+             else os.path.expanduser("~/.local/share/dms-shell"))
+TARGET = os.path.join(SHELL_DIR, "Services/DgopService.qml")
+
+MARKER = "dms-procs-patch"
+
+# DMS 2.0 added its own full-list mode, but only while the search box has
+# text (fullProcessListRefs); sorting by Memory still saw the top 100 by CPU.
+OLD = '''            params.limit = fullProcessListRefs > 0 ? 0 : 100;
+            params.sort = "cpu";'''
+
+NEW = '''            // Local patch (~/.local/bin/dms-procs-patch): fetch every process so
+            // Memory sorting and search are not limited to the top 100 by CPU.
+            params.limit = 0;
+            params.sort = currentSort === "memory" ? "memory" : "cpu";'''
+
+
+def main():
+    with open(TARGET) as f:
+        src = f.read()
+    if MARKER in src:
+        return 10
+    if src.count(OLD) != 1:
+        print(f"dms-procs-patch: anchor not found in {TARGET} "
+              "(DMS changed upstream?)", file=sys.stderr)
+        return 1
+    with open(TARGET, "w") as f:
+        f.write(src.replace(OLD, NEW))
+    print(f"dms-procs-patch: patched {TARGET}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

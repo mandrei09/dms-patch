@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Rebuild the patched DMS QML tree that DMS_SHELL_DIR points at.
+#
+# DMS 1.6 embeds its whole QML tree inside the 75 MB `dms` binary and extracts
+# it to /run/user/$UID/danklinux-shell/<rev> at startup. Editing the reference
+# copy under /usr/share/quickshell/dms does nothing -- that tree ships with the
+# package but is never loaded. `dms run -c DIR` (env: DMS_SHELL_DIR) is the
+# supported way to run a modified UI.
+#
+# So: mirror /usr/share (which is a byte-identical copy of the embedded tree,
+# and is replaced in lockstep with the binary on every `dms` update) into
+# $SHELL_DIR, then re-apply the local patches. Running this before every DMS
+# start means an update can never leave a stale or half-patched shell behind --
+# there is nothing to remember to re-run.
+#
+# Wired up by ~/.config/systemd/user/dms.service.d/shell-dir.conf.
+set -euo pipefail
+
+SRC=${DMS_SHELL_SRC:-/usr/share/quickshell/dms/quickshell}
+DST=${DMS_SHELL_DIR:-$HOME/.local/share/dms-shell}
+
+[ -f "$SRC/shell.qml" ] || { echo "no DMS reference tree at $SRC" >&2; exit 1; }
+
+mkdir -p "$DST"
+# --delete so a file dropped upstream (or a patch leftover) doesn't linger.
+# The .bak-* files are debris the patch scripts leave in $SRC; don't copy them.
+rsync -a --delete --exclude '*.bak-*' "$SRC/" "$DST/"
+
+# Patch scripts exit 10 when already applied, which cannot happen on a freshly
+# mirrored tree -- treat anything but 0 as a real failure. A failed patch is
+# not fatal: a stock shell beats no shell, so log and carry on.
+for patch in dms-tray-patch dms-launcher-patch dms-procs-patch dms-workspace-dedup-patch dms-notif-icon-patch dms-lock-notif-filter-patch dms-hyprconf-input-patch; do
+    if ! command -v "$patch" >/dev/null 2>&1; then
+        echo "dms-shell-sync: $patch not found, skipping" >&2
+        continue
+    fi
+    if DMS_SHELL_SYNC=1 "$patch" "$DST"; then
+        echo "dms-shell-sync: applied $patch"
+    else
+        echo "dms-shell-sync: $patch FAILED (exit $?) -- running unpatched" >&2
+    fi
+done

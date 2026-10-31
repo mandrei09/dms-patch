@@ -1,0 +1,14 @@
+{
+    "id": "devJwt",
+    "name": "JWT Decoder",
+    "description": "Decode a JWT: expiry in plain words, payload, header and common claims. Does not verify signatures. Leave the query empty to use the clipboard. Shares ../_devtools-common.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "key",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./Launcher.qml",
+    "trigger": "jwt",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

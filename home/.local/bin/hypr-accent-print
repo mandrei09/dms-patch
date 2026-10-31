@@ -1,0 +1,3 @@
+#!/bin/sh
+# Bare accent hex, for callers that want a colour argument (e.g. slurp -c).
+exec /usr/bin/python3 "$HOME/.local/bin/accent-resolve.py" --print

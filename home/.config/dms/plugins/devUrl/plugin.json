@@ -1,0 +1,14 @@
+{
+    "id": "devUrl",
+    "name": "URL Encode",
+    "description": "URL encode/decode, plus a decoded breakdown of a URL's query parameters. Leave the query empty to use the clipboard. Shares ../_devtools-common.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "link",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./Launcher.qml",
+    "trigger": "url",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

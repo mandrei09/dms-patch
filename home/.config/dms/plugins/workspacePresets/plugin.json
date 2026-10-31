@@ -1,0 +1,14 @@
+{
+    "id": "workspacePresets",
+    "name": "Workspace Presets",
+    "description": "Lay out a work context across Hyprland workspaces: launches or reuses each app, moves it to its workspace and groups it into tabs. Presets live in ~/.config/DankMaterialShell/workspace-presets.json.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "view_quilt",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./WorkspacePresets.qml",
+    "trigger": "wp",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

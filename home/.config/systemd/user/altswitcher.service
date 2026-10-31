@@ -1,0 +1,20 @@
+[Unit]
+Description=Alt+Tab window switcher overlay (quickshell)
+# Was `exec-once = qs -c altswitcher -n` in hyprland.conf. That had no
+# supervision and threw its stderr away: at login hypr-monitor-watch disables
+# eDP-1 in the same second the overlay starts, the qs process died silently,
+# and Alt+Tab stayed dead for the rest of the session.
+PartOf=graphical-session.target
+After=graphical-session.target hypr-monitor-watch.service
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+# A crash loop should not be throttled into giving up for good.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/qs -c altswitcher -n
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=hyprland-session.target

@@ -1,0 +1,9 @@
+[Unit]
+Description=Apply the DMS accent to Hyprland, GTK 4, Satty, Ghostty, tmux, Yazi
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+
+[Service]
+Type=oneshot
+# DMS writes the palette in more than one step; let it settle.
+ExecStartPre=/bin/sleep 1
+ExecStart=%h/.local/bin/hypr-accent

@@ -1,0 +1,11 @@
+# Any apt/dpkg operation (install, upgrade, autoremove) rewrites
+# /var/lib/dpkg/status -- re-check the local DMS customisations afterwards.
+[Unit]
+Description=Re-check local DMS customisations after package changes
+
+[Path]
+PathChanged=/var/lib/dpkg/status
+Unit=dms-update-guard.service
+
+[Install]
+WantedBy=default.target

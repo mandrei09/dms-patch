@@ -1,0 +1,17 @@
+{
+    "id": "guidGenerator",
+    "name": "GUID Generator",
+    "description": "Generate GUIDs/UUIDs from the launcher: `guid` for one in every common format, `guid 10` for a batch. Enter copies, Shift+Enter pastes.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "fingerprint",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./GuidLauncher.qml",
+    "trigger": "guid",
+    "requires_dms": ">=1.4.0",
+    "permissions": [
+        "settings_read",
+        "process"
+    ]
+}

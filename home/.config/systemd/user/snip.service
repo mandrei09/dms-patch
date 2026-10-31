@@ -1,0 +1,15 @@
+[Unit]
+Description=Snipping Tool overlay, Super+Shift+S (quickshell)
+PartOf=graphical-session.target
+After=graphical-session.target hypr-monitor-watch.service
+ConditionEnvironment=HYPRLAND_INSTANCE_SIGNATURE
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/qs -c snip -n
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=hyprland-session.target

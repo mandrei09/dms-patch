@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""Stop the DMS workspace switcher showing the same Hyprland workspace twice.
+
+Symptom: after some boots the bar reads "2 2 3" while `hyprctl workspaces`
+lists 1, 2, 3 once each. It persists until DMS restarts.
+
+Cause: a startup race. hypr-monitor-watch disables eDP-1 at ~24.60 s after
+boot and DMS starts at ~24.62 s, so the workspace that lived on eDP-1 moves to
+DP-2 while Quickshell is still building its workspace model from the initial
+snapshot plus the event stream. It can end up holding two objects with the
+same id. Hyprland ids are unique, so collapsing them by id is always safe.
+
+Which copy to keep: the one still attached to a monitor (the stale one is the
+leftover from the disabled panel), otherwise the newest.
+
+See ~/.local/bin/dms-shell-sync for why patches go into $DMS_SHELL_DIR rather
+than /usr/share.
+
+Usage: dms-workspace-dedup-patch [shell-dir]  (default: ~/.local/share/dms-shell)
+Idempotent: exit 10 means it was already in place.
+"""
+
+import os
+import sys
+
+SHELL_DIR = (sys.argv[1] if len(sys.argv) > 1
+             else os.path.expanduser("~/.local/share/dms-shell"))
+# DMS 2.0: the bar reads Hyprland workspaces through CompositorService's
+# _hyprlandWorkspaceState(), so de-dup at that single source.
+TARGET = os.path.join(SHELL_DIR, "Services/CompositorService.qml")
+
+MARKER = "dms-workspace-dedup-patch"
+
+OLD = '''    function _hyprlandWorkspaceState() {
+        return {
+            get workspaces() {
+                return Hyprland.workspaces?.values || [];
+            },'''
+
+NEW = '''    function _hyprlandWorkspaceState() {
+        return {
+            get workspaces() {
+                // Local patch (~/.local/bin/dms-workspace-dedup-patch): a monitor
+                // being disabled while DMS starts can leave Quickshell with two
+                // objects for one workspace id ("2 2 3"). Ids are unique in
+                // Hyprland; keep the one still attached to a monitor.
+                const byId = new Map();
+                for (const ws of (Hyprland.workspaces?.values || [])) {
+                    const prev = byId.get(ws.id);
+                    if (!prev || ws.monitor || !prev.monitor)
+                        byId.set(ws.id, ws);
+                }
+                return Array.from(byId.values());
+            },'''
+
+
+def main():
+    with open(TARGET) as f:
+        src = f.read()
+    if MARKER in src:
+        return 10
+    if src.count(OLD) != 1:
+        print(f"dms-workspace-dedup-patch: anchor not found in {TARGET} "
+              "(DMS changed upstream?)", file=sys.stderr)
+        return 1
+    with open(TARGET, "w") as f:
+        f.write(src.replace(OLD, NEW))
+    print(f"dms-workspace-dedup-patch: patched {TARGET}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

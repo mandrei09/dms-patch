@@ -1,0 +1,14 @@
+{
+    "id": "dockerLauncher",
+    "name": "Docker",
+    "description": "Start, stop, restart, tail logs of and open a shell in Docker containers from the launcher; compose projects get start/stop/restart-all in dependency order.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "deployed_code",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./DockerLauncher.qml",
+    "trigger": "dk",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

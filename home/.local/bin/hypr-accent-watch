@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Re-run hypr-accent whenever the desktop accent changes.
+#
+# The 2s debounce mirrors the reasoning already documented inside
+# sync-accent.py: GNOME flips gtk-theme and accent-color as two separate
+# writes, so firing on the first one reads a half-applied state.
+set -uo pipefail
+
+# While DMS runs the gnome-accent custom theme, a GTK accent change has to
+# rebuild that theme first; DMS then repaints and hypr-accent.path carries the
+# new palette everywhere else. With any other DMS theme, DMS is the source and
+# the GTK accent is left alone.
+apply() {
+    if jq -e '.currentThemeName == "custom" and (.customThemeFile | endswith("/gnome-accent/theme.json"))' \
+        "$HOME/.config/dms/settings.json" >/dev/null 2>&1; then
+        "$HOME/.local/bin/hypr-dms-accent" >/dev/null 2>&1 || true
+    fi
+    "$HOME/.local/bin/hypr-accent" || true
+}
+
+apply
+gsettings monitor org.gnome.desktop.interface \
+  | grep --line-buffered -E '^(gtk-theme|accent-color|color-scheme):' \
+  | while read -r _; do
+        sleep 2
+        apply
+    done

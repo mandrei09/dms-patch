@@ -1,0 +1,724 @@
+#!/usr/bin/env bash
+# Local patches to the DMS spotlight launcher.
+#
+#   1. "Preview" action on file results -> GNOME Sushi (Nautilus's spacebar
+#      previewer). Interface is org.gnome.NautilusPreviewer2; the unversioned
+#      org.gnome.NautilusPreviewer is not exported and returns UnknownMethod.
+#   2. Right arrow opens the action menu on the selected result, like
+#      right-click or the Menu key. Guarded on the caret being at the end of
+#      the query, so Right still moves the text cursor while editing.
+#   3. A right-hand details pane (size, modified, kind, permissions, MIME,
+#      image thumbnail, scrollable text excerpt, rendered markdown, and a
+#      button that opens the full Sushi preview), widening it 680 -> 1040.
+#   4. Word triggers ("qr", "guid", "pw") only fire as a whole word, so they
+#      stop hijacking searches that merely start with the same letters.
+#   5. A plugin invoked by its trigger shows all its results in its own
+#      order, instead of having them re-filtered by the fuzzy scorer.
+#   6. In the All tab, file search no longer overwrites a triggered plugin's
+#      results ("ssh", "dk" showed files instead).
+#   7. Plugin results can carry a `details` sheet for the pane, and the
+#      results area keeps a minimum height while one is shown.
+#   8. The same details pane in the full launcher (Super key), which renders
+#      LauncherContent.qml rather than the spotlight bar's content file.
+#   9. No "Pinned" anywhere: the unused Pinned section is dropped and the
+#      "Pin to Dock" menu item removed (the dock is off; user doesn't pin).
+#  10. Right arrow opens the action menu in the full launcher as well.
+#  11. Extra menu actions (LauncherExtraActions.qml + dms-launcher-action):
+#      files/folders get Show in Files, VS Code, Open with…, tmux, copy
+#      name/file/contents, git remote, Extract, Trash; apps get Focus / Quit /
+#      Force quit, Open .desktop file, Copy launch command, Launch on
+#      workspace…. Submenus drill down in place.
+#  12. The full launcher's sort / category dropdowns no longer close it.
+#
+# DMS 1.6 embeds its QML tree in the `dms` binary and extracts it to
+# /run/user/$UID/danklinux-shell/<rev> at startup, so patching the reference
+# copy under /usr/share has no effect -- that tree is not what runs. The
+# patched tree lives in $HOME and DMS is pointed at it with DMS_SHELL_DIR; see
+# ~/.local/bin/dms-shell-sync, which rebuilds that tree from /usr/share and
+# runs this script against it before every DMS start. No root needed.
+#
+# Usage: dms-launcher-patch [shell-dir]   (default: ~/.local/share/dms-shell)
+# Idempotent: exit 10 means everything was already in place. The pane shells
+# out to ~/.local/bin/dms-file-details, which lives in $HOME and so survives
+# updates on its own.
+set -euo pipefail
+
+SHELL_DIR="${1:-$HOME/.local/share/dms-shell}"
+BASE="$SHELL_DIR/Modals/DLauncherV2"
+TRANSFORMERS="$BASE/ItemTransformers.js"
+CONTROLLER="$BASE/Controller.qml"
+CONTENT="$BASE/SpotlightLauncherContent.qml"
+MODAL="$BASE/DLauncherV2ModalHost.qml"
+LAUNCHERTAB="$BASE/../../Modules/Settings/LauncherTab.qml"
+PANE="$BASE/LauncherDetailsPane.qml"
+FULLCONTENT="$BASE/LauncherContent.qml"
+STANDALONE="$BASE/DLauncherV2ModalHost.qml"
+CONNECTED="$BASE/DLauncherV2ModalHost.qml"
+CTXMENU="$BASE/LauncherContextMenu.qml"
+
+[ -w "$TRANSFORMERS" ] || { echo "not writable: $TRANSFORMERS" >&2; exit 1; }
+
+# The pane component is a new file -- a dms update deletes it along with the
+# rest of the tree, so it is rewritten every run. Compare before replacing:
+# the pane changing is on its own reason to restart DMS, even when none of the
+# text patches below have anything left to do.
+PANE_TMP="$(mktemp)"
+trap 'rm -f "$PANE_TMP"' EXIT
+# The pane lives in its own file (easier to edit than QML embedded in a
+# heredoc, and no quoting traps); it is copied into the tree on every run.
+PANE_SRC="${DMS_PANE_SRC:-$HOME/.local/share/dms-launcher-patch/LauncherDetailsPane.qml}"
+[ -f "$PANE_SRC" ] || { echo "missing $PANE_SRC" >&2; exit 1; }
+cat "$PANE_SRC" > "$PANE_TMP"
+if cmp -s "$PANE_TMP" "$PANE" 2>/dev/null; then
+    pane_changed=0
+    echo "LauncherDetailsPane.qml:      unchanged"
+else
+    cat "$PANE_TMP" > "$PANE"
+    pane_changed=1
+    echo "LauncherDetailsPane.qml:      installed"
+fi
+
+# Same deal for the extra menu actions component (patch 15).
+EXTRA="$BASE/LauncherExtraActions.qml"
+EXTRA_SRC="${DMS_EXTRA_SRC:-$HOME/.local/share/dms-launcher-patch/LauncherExtraActions.qml}"
+[ -f "$EXTRA_SRC" ] || { echo "missing $EXTRA_SRC" >&2; exit 1; }
+if cmp -s "$EXTRA_SRC" "$EXTRA" 2>/dev/null; then
+    echo "LauncherExtraActions.qml:     unchanged"
+else
+    cat "$EXTRA_SRC" > "$EXTRA"
+    pane_changed=1
+    echo "LauncherExtraActions.qml:     installed"
+fi
+
+rc=0
+python3 - "$TRANSFORMERS" "$CONTROLLER" "$CONTENT" "$MODAL" "$LAUNCHERTAB" "$FULLCONTENT" "$STANDALONE" "$CONNECTED" "$CTXMENU" <<'PY' || rc=$?
+import sys, shutil, datetime, re, os
+
+transformers, controller, content, modal, launchertab = sys.argv[1:6]
+fullcontent, standalone, connected, ctxmenu = sys.argv[6:10]
+stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+changed = False
+
+def backup(path):
+    shutil.copy(path, f"{path}.bak-{stamp}")
+
+# ── 1. attach a Preview action to non-directory file results ──────────
+s = open(transformers).read()
+if '"preview"' in s:
+    print("ItemTransformers.js:          already patched")
+else:
+    anchor = '''    } else {
+        actions.push({
+            name: openFolderLabel,'''
+    assert s.count(anchor) == 1, "ItemTransformers.js: anchor not found/unique"
+    s = s.replace(anchor, '''    } else {
+        actions.push({
+            name: "Preview",
+            icon: "visibility",
+            action: "preview"
+        });
+        actions.push({
+            name: openFolderLabel,''')
+    backup(transformers); open(transformers, "w").write(s)
+    print("ItemTransformers.js:          patched (Preview action)")
+    changed = True
+
+# ── 2. dispatch "preview" to the Sushi previewer over D-Bus ───────────
+c = open(controller).read()
+if 'case "preview":' in c:
+    print("Controller.qml:               already patched")
+else:
+    case_anchor = '''        case "open_terminal":
+            openTerminal(item.data.path);
+            break;'''
+    assert c.count(case_anchor) == 1, "Controller.qml: case anchor not found/unique"
+    c = c.replace(case_anchor, case_anchor + '''
+        case "preview":
+            previewFile(item.data.path);
+            break;''')
+
+    fn_anchor = "    function copyToClipboard(text) {"
+    assert c.count(fn_anchor) == 1, "Controller.qml: function anchor not found/unique"
+    c = c.replace(fn_anchor, '''    function previewFile(path) {
+        if (!path)
+            return;
+        Quickshell.execDetached({
+            command: ["gdbus", "call", "--session", "--dest", "org.gnome.NautilusPreviewer", "--object-path", "/org/gnome/NautilusPreviewer", "--method", "org.gnome.NautilusPreviewer2.ShowFile", "file://" + path, "", "true", ""]
+        });
+    }
+
+''' + fn_anchor)
+    backup(controller); open(controller, "w").write(c)
+    print("Controller.qml:               patched (preview dispatch)")
+    changed = True
+
+# ── 3. Right arrow opens the action menu ──────────────────────────────
+# DMS 2.0 handles Right/Left itself, but only to move through grid sections;
+# in list sections it falls through. Open the menu there instead, with the
+# caret at the end of the query so Right still moves the text cursor.
+t = open(content).read()
+content_dirty = False
+if "searchInput.cursorPosition >= searchInput.text.length" in t:
+    print("SpotlightLauncherContent.qml: Right arrow already patched")
+else:
+    key_anchor = """        case Qt.Key_Right:
+        case Qt.Key_Left:
+            if (root.controller.getCurrentSectionViewMode() === "list")
+                break;
+"""
+    assert t.count(key_anchor) == 1, "SpotlightLauncherContent.qml: Right/Left anchor not found/unique"
+    t = t.replace(key_anchor, """        case Qt.Key_Right:
+        case Qt.Key_Left:
+            if (root.controller.getCurrentSectionViewMode() === "list") {
+                if (event.key === (I18n.isRtl ? Qt.Key_Left : Qt.Key_Right) && searchInput.cursorPosition >= searchInput.text.length && contextMenu.hasContextMenuActions(root.controller.selectedItem)) {
+                    const rightPos = resultsList.getSelectedItemPosition();
+                    _showContextMenu(root.controller.selectedItem, rightPos.x, rightPos.y, true);
+                    event.accepted = true;
+                    return;
+                }
+                break;
+            }
+""")
+    print("SpotlightLauncherContent.qml: patched (Right arrow -> menu)")
+    content_dirty = True
+
+# ── 4. mount the details pane beside the results list ─────────────────
+# 2.0: the list lives in a ClippingRectangle (resultsContainer) inset by
+# resultsInset on both sides, so the pane needs no border inset of its own.
+PANE_WIDTH = 440
+if "LauncherDetailsPane {" in t:
+    print("SpotlightLauncherContent.qml: details pane already mounted")
+else:
+    list_anchor = """        ResultsList {
+            id: resultsList
+            focusReturnTarget: searchInput
+            keyForwardTargets: [searchKeyHandler]
+            readonly property real bottomInset: Theme.spacingS
+            anchors.fill: parent
+            anchors.topMargin: root._resultsTopGap
+"""
+    assert t.count(list_anchor) == 1, "SpotlightLauncherContent.qml: results list anchor not found/unique"
+    t = t.replace(list_anchor, f"""        LauncherDetailsPane {{
+            id: detailsPane
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.right: parent.right
+            anchors.topMargin: root._resultsTopGap
+            anchors.bottomMargin: Theme.spacingS
+            width: {PANE_WIDTH}
+            item: root.controller.selectedItem
+            onRequestClose: root.parentModal?.hide()
+        }}
+
+        ResultsList {{
+            id: resultsList
+            focusReturnTarget: searchInput
+            keyForwardTargets: [searchKeyHandler]
+            readonly property real bottomInset: Theme.spacingS
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            width: parent.width - detailsPane.width - Theme.spacingS
+            anchors.topMargin: root._resultsTopGap
+""")
+    print("SpotlightLauncherContent.qml: patched (details pane mounted)")
+    content_dirty = True
+
+if content_dirty:
+    backup(content); open(content, "w").write(t)
+    changed = True
+
+# ── 6. frecency for EVERY result type, not just apps ─────────────────
+# Scorer.score() already adds min(usageCount*50, 2000) to any item and
+# Controller passes getFrecencyForItem into it -- but that function bailed out
+# with `if (item.type !== "app") return null`, so files, settings, folders and
+# plugin results never accumulated a ranking. Reuse the existing
+# AppUsageHistoryData store under composite "<type>:<id>" keys; it is safe
+# because cleanupAppUsageRanking() is never called anywhere.
+c2 = open(controller).read()
+if "usageKeyForItem" in c2:
+    print("Controller.qml:               frecency already covers all types")
+else:
+    frec_anchor = """    function getFrecencyForItem(item) {
+        if (item.type !== "app")
+            return null;
+"""
+    assert c2.count(frec_anchor) == 1, "Controller.qml: getFrecencyForItem anchor not found/unique"
+    c2 = c2.replace(frec_anchor, """    function usageKeyForItem(item) {
+        if (!item || !item.id)
+            return "";
+        return item.type + ":" + item.id;
+    }
+
+    function recordItemUsage(item) {
+        var key = usageKeyForItem(item);
+        if (!key)
+            return;
+        AppUsageHistoryData.addAppUsage({
+            "id": key,
+            "name": item.name || "",
+            "icon": item.icon || ""
+        });
+    }
+
+    function getFrecencyForItem(item) {
+        if (item.type !== "app") {
+            var key = usageKeyForItem(item);
+            var d = key ? (AppUsageHistoryData.appUsageRanking || {})[key] : null;
+            return d ? {
+                usageCount: d.usageCount || 0
+            } : null;
+        }
+""")
+
+    # record on execute -- apps already record via launchApp(), so skip them
+    exec_anchor = """        switch (item.type) {
+        case "app":
+            if (item.isCore) {"""
+    assert c2.count(exec_anchor) == 1, "Controller.qml: executeItem switch anchor not found/unique"
+    c2 = c2.replace(exec_anchor, """        // Apps already record usage inside launchApp(); counting them here
+        // too would double-score every launch.
+        if (item.type !== "app")
+            recordItemUsage(item);
+
+""" + exec_anchor)
+    backup(controller); open(controller, "w").write(c2)
+    print("Controller.qml:               patched (frecency for all result types)")
+    changed = True
+
+# ── 7. keep Settings > Recent Apps showing only apps ─────────────────
+if not os.path.exists(launchertab):
+    print("LauncherTab.qml:              not found, skipping (cosmetic only)")
+    t2 = None
+else:
+    t2 = open(launchertab).read()
+if t2 is None:
+    pass
+elif "indexOf(\":\") !== -1" in t2:
+    print("LauncherTab.qml:              already filters non-app usage keys")
+else:
+    tab_m = re.findall(r"\n( *)for \(var appId in ranking\) \{\n", t2)
+    if len(tab_m) != 1:
+        print("LauncherTab.qml:              WARNING anchor not unique, list may show file entries")
+    else:
+        ind = tab_m[0]
+        tab_anchor = f"\n{ind}for (var appId in ranking) {{\n"
+        t2 = t2.replace(tab_anchor, tab_anchor + f"""{ind}    // Composite "<type>:<id>" keys are non-app results
+{ind}    // recorded for frecency; this list is apps only.
+{ind}    if (appId.indexOf(":") !== -1)
+{ind}        continue;
+""")
+        backup(launchertab); open(launchertab, "w").write(t2)
+        print("LauncherTab.qml:              patched (hide non-app usage keys)")
+        changed = True
+
+# ── 8. word triggers only fire on a whole word ───────────────────────
+# Stock matching is a bare startsWith, so a trigger like "pw" or "guid"
+# hijacks every search that merely begins with those letters ("pwvucontrol",
+# "guidelines.md"). A trigger ending in a letter or digit now has to be the
+# whole query or be followed by whitespace; symbol triggers ("=", "?", "#")
+# keep prefix semantics, since "=2+2" is the point of them.
+c3 = open(controller).read()
+if "function _triggerMatches(" in c3:
+    print("Controller.qml:               word triggers already patched")
+else:
+    old = "            if (trigger && query.startsWith(trigger)) {"
+    assert c3.count(old) == 2, "Controller.qml: detectTrigger startsWith anchors not found (expected 2)"
+    c3 = c3.replace(old, "            if (trigger && _triggerMatches(query, trigger)) {")
+    fn_anchor = "    function detectTrigger(query) {"
+    assert c3.count(fn_anchor) == 1, "Controller.qml: detectTrigger anchor not found/unique"
+    c3 = c3.replace(fn_anchor, """    function _triggerMatches(query, trigger) {
+        if (!query.startsWith(trigger))
+            return false;
+        if (!/[A-Za-z0-9]$/.test(trigger))
+            return true;
+        return query.length === trigger.length || /\\s/.test(query.charAt(trigger.length));
+    }
+
+""" + fn_anchor)
+    backup(controller); open(controller, "w").write(c3)
+    print("Controller.qml:               patched (word triggers need a word boundary)")
+    changed = True
+
+# ── 9. a triggered plugin's results are not re-filtered ──────────────
+# When a plugin is invoked by its trigger, stock DMS still runs every result
+# through the fuzzy scorer against the remaining query, so "cv 5km-mi" drops
+# the converter's "3.10686mi" (no text overlap) and "guid 5" only survives
+# when a "5" happens to appear in a subtitle. Built-in plugins are already
+# pre-scored here; give third-party ones the same treatment, keeping the
+# plugin's own order, since the plugin has done its own matching.
+c4 = open(controller).read()
+if "pluginItems[k]._preScored = 1000 - k;" in c4:
+    print("Controller.qml:               triggered plugin results already pre-scored")
+else:
+    old = """            var pluginItems = getPluginItems(triggerMatch.pluginId, triggerMatch.query);
+            for (var k = 0; k < pluginItems.length; k++)
+                allItems.push(pluginItems[k]);"""
+    assert c4.count(old) == 1, "Controller.qml: triggered plugin loop anchor not found/unique"
+    c4 = c4.replace(old, """            var pluginItems = getPluginItems(triggerMatch.pluginId, triggerMatch.query);
+            for (var k = 0; k < pluginItems.length; k++) {
+                if (pluginItems[k]._preScored === undefined)
+                    pluginItems[k]._preScored = 1000 - k;
+                allItems.push(pluginItems[k]);
+            }""")
+    backup(controller); open(controller, "w").write(c4)
+    print("Controller.qml:               patched (triggered plugin results keep plugin order)")
+    changed = True
+
+# ── 10. file search stays out of a triggered plugin's view ───────────
+# With files/folders included in the All tab, every query also fires a dsearch
+# lookup whose callback rebuilds the sections -- it never checks for a plugin
+# trigger, so "ssh" or "dk" showed files instead of the plugin, depending on
+# which async result landed last. Skip the lookup when a trigger matches, and
+# drop results that come back after one was typed.
+c5 = open(controller).read()
+if "_fileSearchSuppressed()" in c5:
+    print("Controller.qml:               file search already yields to triggers")
+else:
+    fn_anchor = "    function performFileSearch() {\n        if (!active || !DSearchService.dsearchAvailable)\n            return;\n"
+    assert c5.count(fn_anchor) == 1, "Controller.qml: performFileSearch anchor not found/unique"
+    c5 = c5.replace(fn_anchor, """    function _fileSearchSuppressed() {
+        return searchMode === "all" && !searchQuery.startsWith("/") && !!detectTrigger(searchQuery).pluginId;
+    }
+
+    function performFileSearch() {
+        if (!active || !DSearchService.dsearchAvailable)
+            return;
+        if (_fileSearchSuppressed()) {
+            isFileSearching = false;
+            return;
+        }
+""")
+    cb_anchor = """                isFileSearching = false;
+                _applyFileSearchResults(aggregatedItems, effectiveType);"""
+    assert c5.count(cb_anchor) == 1, "Controller.qml: file search callback anchor not found/unique"
+    c5 = c5.replace(cb_anchor, """                isFileSearching = false;
+                if (_fileSearchSuppressed())
+                    return;
+                _applyFileSearchResults(aggregatedItems, effectiveType);""")
+    backup(controller); open(controller, "w").write(c5)
+    print("Controller.qml:               patched (file search yields to plugin triggers)")
+    changed = True
+
+# ── 11. room for a details sheet even with one result ────────────────
+# The results area is exactly as tall as its rows, and the details pane is
+# anchored inside it -- so `dk postgres` (one or two hits) squashed a whole
+# sheet of ports/networks/volumes into ~70px. Every result type now renders a
+# details sheet, so give the area a floor whenever something is selected.
+t3 = open(content).read()
+if "selectedItem ? 420" in t3 or "data?.details?.length" in t3:
+    print("SpotlightLauncherContent.qml: details height floor already patched")
+else:
+    old = "    readonly property real _resultsH: _hasQuery ? Math.min(_resultsContentH, _maxResultsH) : 0"
+    assert t3.count(old) == 1, "SpotlightLauncherContent.qml: _resultsH anchor not found/unique"
+    t3 = t3.replace(old, "    readonly property real _resultsH: _hasQuery ? Math.min(Math.max(_resultsContentH, root.controller?.selectedItem ? 420 : 0), _maxResultsH) : 0")
+    backup(content); open(content, "w").write(t3)
+    print("SpotlightLauncherContent.qml: patched (details height floor)")
+    changed = True
+
+# ── 12. the same details pane in the full launcher (Super key) ───────
+# `spotlight toggle` with launcherStyle=full renders LauncherContent.qml, a
+# different file from SpotlightLauncherContent. Split resultsSlot: results on
+# the left, the pane on the right.
+FULL_PANE_W = 440
+f = open(fullcontent).read()
+if "LauncherDetailsPane {" in f:
+    print("LauncherContent.qml:          details pane already mounted")
+else:
+    full_anchor = """                ResultsList {
+                    id: resultsList
+                    focusReturnTarget: searchField
+                    keyForwardTargets: [root]
+                    anchors.fill: parent
+"""
+    assert f.count(full_anchor) == 1, "LauncherContent.qml: ResultsList anchor not found/unique"
+    f = f.replace(full_anchor, f"""                LauncherDetailsPane {{
+                    id: detailsPane
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.right: parent.right
+                    width: {FULL_PANE_W}
+                    item: root.controller.selectedItem
+                    onRequestClose: root.parentModal?.hide()
+                }}
+
+                ResultsList {{
+                    id: resultsList
+                    focusReturnTarget: searchField
+                    keyForwardTargets: [root]
+                    anchors.top: parent.top
+                    anchors.bottom: parent.bottom
+                    anchors.left: parent.left
+                    width: parent.width - detailsPane.width - Theme.spacingM
+""")
+    backup(fullcontent); open(fullcontent, "w").write(f)
+    print("LauncherContent.qml:          patched (details pane mounted)")
+    changed = True
+
+# ── 13. drop "Pinned": the section and the "Pin to Dock" menu item ───
+# The user doesn't pin apps and the dock is off (showDock=false), so the
+# Pinned section (never populated in 1.6 anyway) and the per-app "Pin to
+# Dock" / "Unpin from Dock" context entry are just noise.
+c13 = open(controller).read()
+fav_re = re.compile(r'        \{\n            id: "favorites",\n            title: I18n\.tr\("Pinned"\),\n            icon: "push_pin",\n            priority: 1,\n            defaultViewMode: "list"\n        \},\n')
+if 'id: "favorites"' not in c13:
+    print("Controller.qml:               Pinned section already removed")
+else:
+    assert len(fav_re.findall(c13)) == 1, "Controller.qml: Pinned section anchor not found/unique"
+    c13 = fav_re.sub("", c13)
+    backup(controller); open(controller, "w").write(c13)
+    print("Controller.qml:               patched (Pinned section removed)")
+    changed = True
+
+# 2.0 only offers "Pin to Dock" when a dock exists (pinDockId), and the
+# dock is off -- nothing to remove from the menu any more.
+
+# ── 14. Right arrow opens the action menu in the full launcher too ───
+# Same as 3, for LauncherContent.qml (Super). Stock Right only moves the
+# selection in grid sections, so the menu fires in list sections only, and
+# only with the caret at the end of the query.
+f14 = open(fullcontent).read()
+if "searchField.cursorPosition >= searchField.text.length" in f14:
+    print("LauncherContent.qml:          Right arrow already patched")
+else:
+    right_anchor = """        case Qt.Key_Right:
+            if (controller.getCurrentSectionViewMode() !== "list") {
+                I18n.isRtl ? controller.selectLeft() : controller.selectRight();
+                return;
+            }
+            event.accepted = false;
+            return;"""
+    assert f14.count(right_anchor) == 1, "LauncherContent.qml: Right arrow anchor not found/unique"
+    f14 = f14.replace(right_anchor, """        case Qt.Key_Right:
+            if (controller.getCurrentSectionViewMode() !== "list") {
+                I18n.isRtl ? controller.selectLeft() : controller.selectRight();
+                return;
+            }
+            if (searchField.cursorPosition >= searchField.text.length && contextMenu.hasContextMenuActions(controller.selectedItem)) {
+                var rightPos = resultsList.getSelectedItemPosition();
+                var rightLocal = root.mapFromItem(null, rightPos.x, rightPos.y);
+                showContextMenu(controller.selectedItem, rightLocal.x, rightLocal.y, true);
+                return;
+            }
+            event.accepted = false;
+            return;""")
+    backup(fullcontent); open(fullcontent, "w").write(f14)
+    print("LauncherContent.qml:          patched (Right arrow -> menu)")
+    changed = True
+
+# ── 15. extra menu actions (LauncherExtraActions.qml) ────────────────
+# 2.0's menu is a DContextMenu: entries carry their own `action` closures, so
+# the hooks only mount the component, fetch its info when the menu opens,
+# splice its entries in, and give it first go at keys (submenu navigation).
+# The key hook lives in the shared DContextMenu as an overridable no-op.
+m15 = open(ctxmenu).read()
+if "LauncherExtraActions {" in m15:
+    print("LauncherContextMenu.qml:      extra actions already patched")
+else:
+    def sub1(old, new, what):
+        global m15
+        assert m15.count(old) == 1, f"LauncherContextMenu.qml: {what} anchor not found/unique"
+        m15 = m15.replace(old, new)
+
+    sub1("""    signal editAppRequested(var app)
+""", """    signal editAppRequested(var app)
+
+    LauncherExtraActions {
+        id: extraActions
+        menu: root
+    }
+
+    function handleKeyHook(event) {
+        if (event.key === Qt.Key_Right)
+            return extraActions.openSelectedSubmenu();
+        if ((event.key === Qt.Key_Left || event.key === Qt.Key_Escape) && extraActions.subMenu) {
+            extraActions.back();
+            return true;
+        }
+        return false;
+    }
+""", "signal")
+    sub1("""    menuItems: {
+        if (isPluginItem)""", """    menuItems: {
+        if (extraActions.subMenu)
+            return extraActions.subMenuItems();
+
+        if (isPluginItem)""", "menuItems")
+    sub1("""        if (item?.type !== "app" && item?.actions?.length > 0)
+            return item.actions.map(act => ({
+                        type: "item",
+                        icon: act.icon || "play_arrow",
+                        text: act.name || "",
+                        action: () => executeLauncherAction(act)
+                    }));
+""", """        if (item?.type !== "app" && item?.actions?.length > 0) {
+            const stock = item.actions.map(act => ({
+                        type: "item",
+                        icon: act.icon || "play_arrow",
+                        text: act.name || "",
+                        action: () => executeLauncherAction(act)
+                    }));
+            return item.type === "file" ? stock.concat(extraActions.fileItems(item)) : stock;
+        }
+""", "generic actions")
+    sub1("""        items.push({
+            type: "separator"
+        });
+        if (isRegularApp && SessionService.nvidiaCommand)""", """        if (isRegularApp)
+            extraActions.appendAppItems(items, item);
+        items.push({
+            type: "separator"
+        });
+        if (isRegularApp && SessionService.nvidiaCommand)""", "dGPU separator")
+    sub1("""        items.push({
+            type: "item",
+            icon: "launch",
+            text: I18n.tr("Launch", "verb, start an application"),""", """        if (isRegularApp)
+            extraActions.appendLaunchItems(items, item);
+        items.push({
+            type: "item",
+            icon: "launch",
+            text: I18n.tr("Launch", "verb, start an application"),""", "Launch item")
+    sub1("""        item = spotlightItem;
+""", """        item = spotlightItem;
+        extraActions.fetch(spotlightItem);
+""", "show()")
+    sub1("""    onRenderActiveChanged: {
+        if (renderActive)
+            return;
+""", """    onRenderActiveChanged: {
+        if (renderActive)
+            return;
+        extraActions.subMenu = null;
+""", "onRenderActiveChanged")
+    backup(ctxmenu); open(ctxmenu, "w").write(m15)
+    print("LauncherContextMenu.qml:      patched (extra actions)")
+    changed = True
+
+dcm = os.path.join(os.path.dirname(ctxmenu), "../../Widgets/DContextMenu.qml")
+d15 = open(dcm).read()
+if "function handleKeyHook(" in d15:
+    print("DContextMenu.qml:             key hook already patched")
+else:
+    def subd(old, new, what):
+        global d15
+        assert d15.count(old) == 1, f"DContextMenu.qml: {what} anchor not found/unique"
+        d15 = d15.replace(old, new)
+    subd("""    function activate(menuItem) {""", """    // Overridden by LauncherContextMenu (dms-launcher-patch) for submenus.
+    function handleKeyHook(event) {
+        return false;
+    }
+
+    function activate(menuItem) {""", "activate()")
+    subd("""            Keys.onPressed: event => {
+                switch (event.key) {
+                case Qt.Key_Down:
+                    root.selectNext();""", """            Keys.onPressed: event => {
+                if (root.handleKeyHook(event)) {
+                    event.accepted = true;
+                    return;
+                }
+                switch (event.key) {
+                case Qt.Key_Down:
+                    root.selectNext();""", "keyboardHandler")
+    backup(dcm); open(dcm, "w").write(d15)
+    print("DContextMenu.qml:             patched (key hook)")
+    changed = True
+
+# ── 16. (upstream since 2.0) the full launcher's dropdowns register with
+# the transient-surface tracker and hand focus back to the search field.
+
+# ── 16b. a launcher popup must not end the launcher's focus grab ─────
+# Registering the dropdowns (16) is not enough: Hyprland clears the focus
+# grab the moment the dropdown's xdg_popup opens, even with the popup in the
+# grab's window list (verified: onCleared fired with the tracker active, n=1).
+# So when the grab clears while one of the launcher's own transient surfaces
+# is up, keep the launcher open and re-arm the grab once they close. Clicks
+# outside the launcher still close it -- the click-catcher handles those,
+# not the grab.
+grab_re = re.compile(r"(    HyprlandFocusGrab \{\n        id: focusGrab\n        windows: [^\n]+\n        active: ([^\n]+)\n\n?        onCleared: \{\n)(.*?\n        \}\n    \}\n)", re.S)
+for path in (standalone, connected):
+    name = os.path.basename(path)
+    g = open(path).read()
+    if "_grabLostToPopup" in g:
+        print(f"{name}: popup-safe focus grab already patched")
+        continue
+    hits = grab_re.findall(g)
+    assert len(hits) == 1, f"{name}: HyprlandFocusGrab block not found/unique"
+    active_expr = hits[0][1]
+    g = grab_re.sub(lambda mo: mo.group(1) + """            if (transientSurfaces.active || grabRearmTimer.running) {
+                root._grabLostToPopup = true;
+                return;
+            }
+""" + mo.group(3) + f"""
+    property bool _grabLostToPopup: false
+
+    // Re-arming in the same tick the popup closes gets the new grab
+    // cleared at once (keyboard focus is still on the dying popup), so wait
+    // for focus to settle back on the launcher first.
+    Timer {{
+        id: grabRearmTimer
+        interval: 250
+        onTriggered: {{
+            if (transientSurfaces.active || !root.spotlightOpen)
+                return;
+            root._grabLostToPopup = false;
+            focusGrab.active = false;
+            focusGrab.active = Qt.binding(() => {active_expr});
+        }}
+    }}
+
+    Connections {{
+        target: transientSurfaces
+        function onActiveChanged() {{
+            if (transientSurfaces.active) {{
+                grabRearmTimer.stop();
+                return;
+            }}
+            if (root._grabLostToPopup)
+                grabRearmTimer.restart();
+        }}
+    }}
+""", g, count=1)
+    backup(path); open(path, "w").write(g)
+    print(f"{name}: patched (popup-safe focus grab)")
+    changed = True
+
+# ── 5. widen both launchers to fit the pane ───────────────────────────
+# 2.0 has one host for spotlight and full; one expression picks the width.
+m = open(modal).read()
+PANE_EXTRA = FULL_PANE_W + 20
+stock = "readonly property int modalWidth: Math.min(spotlight ? (_dmenuSizeOverride ? LauncherMetrics.sizeWidth(_dmenuSizeOverride) : LauncherMetrics.spotlightWidth) : baseWidth, screenWidth - LauncherMetrics.screenMargin)"
+wide = f"readonly property int modalWidth: Math.min((spotlight ? (_dmenuSizeOverride ? LauncherMetrics.sizeWidth(_dmenuSizeOverride) : LauncherMetrics.spotlightWidth) : baseWidth) + {PANE_EXTRA}, screenWidth - LauncherMetrics.screenMargin)"
+if wide in m:
+    print("DLauncherV2ModalHost.qml:     already widened")
+else:
+    assert m.count(stock) == 1, "DLauncherV2ModalHost.qml: modalWidth line not found/unique"
+    m = m.replace(stock, wide)
+    backup(modal); open(modal, "w").write(m)
+    print(f"DLauncherV2ModalHost.qml:     patched (width +{PANE_EXTRA})")
+    changed = True
+
+sys.exit(0 if changed else 10)
+PY
+
+# python exits 0 (changed) or 10 (nothing to do); anything else is a real
+# failure -- an unhandled exception must not look like a clean no-op run.
+if [ "$rc" -ne 0 ] && [ "$rc" -ne 10 ]; then
+    echo "ERROR: patch step failed (exit $rc) -- see the traceback above." >&2
+    echo "Files already written this run are backed up alongside them." >&2
+    exit "$rc"
+fi
+
+if [ -n "${DMS_SHELL_SYNC:-}" ]; then
+    # Called from dms-shell-sync as part of DMS startup -- restarting the unit
+    # from inside its own ExecStartPre would recurse.
+    :
+elif [ "$rc" -eq 0 ] || [ "$pane_changed" -eq 1 ]; then
+    echo "Restarting DMS..."
+    systemctl --user --machine="${SUDO_USER:-$USER}@" restart dms.service 2>/dev/null \
+        || echo "Could not restart automatically -- run: systemctl --user restart dms.service"
+    echo "Done."
+else
+    echo "Nothing to do -- already patched."
+fi

@@ -1,0 +1,76 @@
+#!/usr/bin/env /usr/bin/python3
+"""Build a DankMaterialShell custom theme seeded from the GNOME accent.
+
+DMS defaults to currentThemeCategory="dynamic", which derives its whole
+Material palette from the wallpaper -- so it drifts away from the desktop
+accent and resets on every restart. This generates a "registry"/"custom"
+theme instead, which DMS treats as fixed.
+
+Seeded from `accent-resolve.py --gtk` (the Yaru theme's own accent), NOT from
+DMS's palette: once DMS runs this theme, the rest of the system follows DMS
+(hypr-accent.path), so GTK accent -> this theme -> DMS -> everything.
+"""
+import json, os, pathlib, subprocess, sys
+
+HOME = pathlib.Path.home()
+SYNC = HOME / ".local/bin/accent-resolve.py"
+OUT = HOME / ".config/dms/themes/gnome-accent/theme.json"
+SCHEME = "scheme-fidelity"   # stays closest to the source hue
+
+# DMS key -> matugen key, taken from Theme.qml's currentThemeData block.
+MAP = {
+    "primary": "primary", "primaryText": "on_primary",
+    "primaryContainer": "primary_container",
+    "secondary": "secondary", "secondaryContainer": "secondary_container",
+    "tertiary": "tertiary", "tertiaryContainer": "tertiary_container",
+    "surface": "surface", "surfaceText": "on_background",
+    "surfaceVariant": "surface_variant", "surfaceVariantText": "on_surface_variant",
+    "surfaceTint": "surface_tint",
+    "background": "background", "backgroundText": "on_background",
+    "outline": "outline",
+    "surfaceContainerLowest": "surface_container_lowest",
+    "surfaceContainerLow": "surface_container_low",
+    "surfaceContainer": "surface_container",
+    "surfaceContainerHigh": "surface_container_high",
+    "surfaceContainerHighest": "surface_container_highest",
+}
+STATIC = {"error": "#F2B8B5", "warning": "#FF9800",
+          "info": "#2196F3", "success": "#4CAF50"}
+
+
+def main():
+    accent = subprocess.run([str(SYNC), "--gtk"],
+                            capture_output=True, text=True).stdout.strip()
+    if not accent.startswith("#"):
+        sys.exit(f"could not resolve accent (got {accent!r})")
+
+    raw = subprocess.run(
+        ["matugen", "color", "hex", accent, "--type", SCHEME, "--json", "hex"],
+        capture_output=True, text=True).stdout
+    colors = json.loads(raw)["colors"]
+
+    theme = {"name": "GNOME Accent", "id": "gnome-accent"}
+    for mode in ("dark", "light"):
+        theme[mode] = {
+            dms: colors[mat][mode]["color"]
+            for dms, mat in MAP.items() if mat in colors
+        }
+        theme[mode].update(STATIC)
+
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(theme, indent=2) + "\n")
+    print(f"accent {accent} -> {OUT}")
+    print(f"  dark primary  {theme['dark']['primary']}")
+    print(f"  light primary {theme['light']['primary']}")
+
+    # Point DMS at it. registry/custom is what makes DMS stop following
+    # the wallpaper; without all three, it reverts to "dynamic" on restart.
+    for k, v in (("customThemeFile", str(OUT)),
+                 ("currentThemeCategory", "registry"),
+                 ("currentThemeName", "custom")):
+        subprocess.run(["dms", "ipc", "call", "settings", "set", k, v],
+                       capture_output=True)
+
+
+if __name__ == "__main__":
+    main()

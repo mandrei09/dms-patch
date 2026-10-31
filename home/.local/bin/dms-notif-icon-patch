@@ -1,0 +1,115 @@
+#!/usr/bin/env python3
+"""Give every notification a real app icon in DMS.
+
+Stock DMS takes the icon only from the notification's app_icon. When that is
+empty it draws the first letter of the app name, and it never consults the
+desktop-entry hint. Senders seen on this machine (from ~/.cache/notify-capture.log):
+
+  starship          app_icon "utilities-terminal" (hardcoded, no config key)
+  flameshot         app_icon often empty
+  EasyEffects       hypr-ee-cycle, no icon
+  Screenshot        the Print bind in hypr/binds.conf, no icon
+  Clipboard Runner  DMS plugin, no icon
+  Sunshine          no icon
+  Software          empty app_icon, desktop-entry org.gnome.Software
+  Online Accounts   generic "dialog-warning"
+  notify-send       scripts that don't pass -a (game/GPU test scripts)
+
+Resolution order (NotifWrapper.appIcon):
+  1. ICONS[appName.lower()]   explicit overrides, beats a generic app_icon
+  2. the sender's app_icon, if any
+  3. the icon of the desktop-entry hint, then of a desktop entry named like appName
+
+Also fixes appName for notifications with an empty app name: stock DMS calls
+heuristicLookup("") which returns an arbitrary entry, so fwupd's firmware
+notice was labelled "file roller".
+
+Icons that aren't in the theme live in ~/.local/share/icons/hicolor/*/apps/
+(starship.png comes from starship's repo, media/icon.png).
+
+See ~/.local/bin/dms-shell-sync for why patches go into $DMS_SHELL_DIR rather
+than /usr/share.
+
+Usage: dms-notif-icon-patch [shell-dir]  (default: ~/.local/share/dms-shell)
+Idempotent: exit 10 means it was already in place.
+"""
+
+import json
+import os
+import sys
+
+SHELL_DIR = (sys.argv[1] if len(sys.argv) > 1
+             else os.path.expanduser("~/.local/share/dms-shell"))
+TARGET = os.path.join(SHELL_DIR, "Services/NotificationService.qml")
+
+MARKER = "dms-notif-icon-patch"
+
+# lower-cased appName -> themed icon name
+ICONS = {
+    "starship": "starship",
+    "flameshot": "org.flameshot.Flameshot",
+    "easyeffects": "com.github.wwmm.easyeffects",
+    "screenshot": "org.gnome.Screenshot",
+    "clipboard runner": "edit-paste",
+    "sunshine": "dev.lizardbyte.app.Sunshine",
+    "software": "org.gnome.Software",
+    "online accounts": "goa-panel",
+    "notify-send": "preferences-system-notifications",
+}
+
+PATCHES = [
+    # 1. resolver function on the service singleton
+    ('''    component NotifWrapper: QtObject {''',
+     '''    // Local patch (~/.local/bin/dms-notif-icon-patch): per-app icon map plus
+    // desktop-entry fallback, so no notification falls back to a bare letter.
+    readonly property var _localNotifIcons: %s
+    function _localNotifIcon(n) {
+        if (!n)
+            return "";
+        const mapped = _localNotifIcons[(n.appName || "").toLowerCase()];
+        if (mapped)
+            return mapped;
+        if (n.appIcon)
+            return n.appIcon;
+        for (const id of [n.desktopEntry, n.appName]) {
+            if (!id)
+                continue;
+            const entry = DesktopEntries.heuristicLookup(id);
+            if (entry && entry.icon)
+                return entry.icon;
+        }
+        return "";
+    }
+
+    component NotifWrapper: QtObject {''' % json.dumps(ICONS)),
+    # 2. use it
+    ('''        readonly property string appIcon: notification?.appIcon ?? ""''',
+     '''        readonly property string appIcon: root._localNotifIcon(notification)'''),
+    # 3. don't look up an empty desktop-entry hint
+    ('''            if (notification.appName == "") {
+                const entry = DesktopEntries.heuristicLookup(notification.desktopEntry);''',
+     '''            if (notification.appName == "" && notification.desktopEntry) {
+                const entry = DesktopEntries.heuristicLookup(notification.desktopEntry);'''),
+]
+
+
+def main():
+    with open(TARGET) as f:
+        src = f.read()
+    if MARKER in src:
+        return 10
+    for old, _ in PATCHES:
+        if src.count(old) != 1:
+            print(f"dms-notif-icon-patch: anchor not found in {TARGET} "
+                  f"(DMS changed upstream?):\n{old}", file=sys.stderr)
+            return 1
+    for old, new in PATCHES:
+        src = src.replace(old, new)
+    with open(TARGET, "w") as f:
+        f.write(src)
+    print(f"dms-notif-icon-patch: patched {TARGET}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

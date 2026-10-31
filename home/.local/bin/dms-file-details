@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# Describe one file for the DMS launcher details pane.
+#
+#   usage: dms-file-details PATH [PYGMENTS_STYLE]
+#
+# Prints a key=value block. Everything after a bare `HEAD<<` line is a raw
+# text excerpt; everything after `HTML<<` is Pygments-highlighted HTML with
+# inline colours, which the pane renders as Qt RichText. Used by
+# LauncherDetailsPane.qml, which shells out here rather than embedding this
+# logic in QML.
+p="${1:-}"
+style="${2:-}"
+[ -n "$p" ] && [ -e "$p" ] || exit 0
+
+stat -c 'SIZE=%s
+MTIME=%Y
+PERM=%A
+KIND=%F' -- "$p" 2>/dev/null || exit 0
+
+m=$(file -b --mime-type -- "$p" 2>/dev/null || true)
+echo "MIME=$m"
+
+if [ -d "$p" ]; then
+    echo "ENTRIES=$(ls -A -- "$p" 2>/dev/null | wc -l)"
+    # Git: only for the top of a work tree, not every subfolder inside one.
+    if [ -e "$p/.git" ] && command -v git >/dev/null 2>&1; then
+        b=$(git -C "$p" branch --show-current 2>/dev/null)
+        [ -n "$b" ] || b=$(git -C "$p" rev-parse --short HEAD 2>/dev/null | sed 's/^/detached at /')
+        [ -n "$b" ] && echo "GITBRANCH=$b"
+        r=$(git -C "$p" remote get-url origin 2>/dev/null || true)
+        [ -n "$r" ] && echo "GITREMOTE=$r"
+    fi
+    exit 0
+fi
+
+# PDFs: render page 1 to a cached PNG (keyed by path + mtime + size, so an
+# edited file re-renders) and hand the pane its path as THUMB=. Also print
+# the page count. pdftoppm is poppler-utils.
+if [ "$m" = "application/pdf" ]; then
+    if command -v pdfinfo >/dev/null 2>&1; then
+        pages=$(pdfinfo -- "$p" 2>/dev/null | sed -n 's/^Pages: *//p')
+        [ -n "$pages" ] && echo "PAGES=$pages"
+    fi
+    if command -v pdftoppm >/dev/null 2>&1; then
+        cache="${XDG_CACHE_HOME:-$HOME/.cache}/dms-file-details"
+        key=$(stat -c '%n|%Y|%s' -- "$p" | md5sum | cut -c1-32)
+        out="$cache/$key"
+        if [ ! -s "$out.png" ]; then
+            mkdir -p "$cache"
+            timeout 5 pdftoppm -png -f 1 -l 1 -singlefile -scale-to 640 -- "$p" "$out.tmp" 2>/dev/null \
+                && mv -f "$out.tmp.png" "$out.png"
+            rm -f "$out.tmp.png"
+            # Keep the cache small: drop thumbnails unused for 30 days.
+            find "$cache" -name '*.png' -atime +30 -delete 2>/dev/null &
+        fi
+        [ -s "$out.png" ] && echo "THUMB=$out.png"
+    fi
+    exit 0
+fi
+
+case "$m" in
+    text/*|application/json|application/xml|application/javascript|application/x-shellscript|application/x-desktop) ;;
+    *) exit 0 ;;
+esac
+
+# The pane scrolls, so read enough to be worth scrolling -- but cap bytes
+# FIRST so a huge single-line file cannot pull the whole thing through the
+# pipe before the line limit applies.
+excerpt=$(head -c 200000 -- "$p" 2>/dev/null | head -n 600)
+
+# Markdown is rendered as a document by the pane, not highlighted as source.
+case "$(printf '%s' "$p" | tr 'A-Z' 'a-z')" in
+    *.md|*.markdown) style="" ;;
+esac
+
+if [ -n "$style" ] && command -v pygmentize >/dev/null 2>&1; then
+    # -N picks a lexer from the filename; "text" means it could not, so fall
+    # back to content sniffing, which catches shebang scripts with no suffix.
+    lexer=$(pygmentize -N "$p" 2>/dev/null || echo text)
+    [ "$lexer" = "text" ] && set -- -g || set -- -l "$lexer"
+
+    # Highlighted output is far heavier for Qt to lay out than plain text
+    # (a span per token), so cap it well below the plain-text limit.
+    html=$(printf '%s\n' "$excerpt" | head -n 300 \
+        | pygmentize "$@" -f html -O noclasses=true,nowrap=true,style="$style" 2>/dev/null || true)
+
+    # No spans means the lexer found nothing worth colouring -- emit plain
+    # text rather than a RichText blob that renders identically but slower.
+    case "$html" in
+        *"<span"*)
+            echo "HTML<<"
+            printf '%s\n' "$html"
+            exit 0
+            ;;
+    esac
+fi
+
+echo "HEAD<<"
+printf '%s\n' "$excerpt"

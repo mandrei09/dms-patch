@@ -1,0 +1,14 @@
+{
+    "id": "vscodeRecent",
+    "name": "VS Code Recent",
+    "description": "Open recently used VS Code folders (local and remote) by name, newest first. Reads workspaceStorage, so it works without the native menu bar; each folder opens in its associated profile.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "code",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./VSCodeRecent.qml",
+    "trigger": "vs",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

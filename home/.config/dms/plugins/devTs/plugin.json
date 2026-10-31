@@ -1,0 +1,14 @@
+{
+    "id": "devTs",
+    "name": "Timestamp",
+    "description": "Convert Unix timestamps (s/ms/us/ns) and date strings to local, UTC and Unix. Leave the query empty to use the clipboard. Shares ../_devtools-common.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "schedule",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./Launcher.qml",
+    "trigger": "ts",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

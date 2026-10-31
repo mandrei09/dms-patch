@@ -1,0 +1,14 @@
+[Unit]
+Description=Re-apply the accent everywhere when DankMaterialShell's palette changes
+
+[Path]
+# DMS rewrites this for every theme type (dynamic, preset, custom) and on the
+# light/dark toggle; it is the system-wide accent source (accent-resolve.py).
+PathChanged=%h/.cache/dms/dms-colors.json
+PathChanged=%h/.local/state/dms/session.json
+PathChanged=%h/.config/dms/themes/gnome-accent/theme.json
+# Switching DMS theme type changes which colours win (see accent-resolve.py).
+PathChanged=%h/.config/dms/settings.json
+
+[Install]
+WantedBy=hyprland-session.target

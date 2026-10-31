@@ -1,0 +1,14 @@
+{
+    "id": "devB64",
+    "name": "Base64",
+    "description": "Base64 encode/decode (standard and URL-safe). Leave the query empty to use the clipboard. Shares ../_devtools-common.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "lock",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./Launcher.qml",
+    "trigger": "b64",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

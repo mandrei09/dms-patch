@@ -1,0 +1,14 @@
+{
+    "id": "rgSearch",
+    "name": "Search in Files",
+    "description": "Search file contents under ~/Work with ripgrep (respects .gitignore) and open the match in VS Code at the line. Literal text by default; /regex/ for a pattern.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "manage_search",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./RgSearch.qml",
+    "trigger": "rg",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["settings_read", "process"]
+}

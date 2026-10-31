@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Collapse the DMS system tray by default.
+
+Stock behaviour: every tray item sits on the bar, and SessionData.hiddenTrayIds
+is an opt-out list you extend by right-clicking each icon in turn. Two problems
+with that: a newly installed background app always shows up on the bar first,
+and the key an item is stored under is `id::tooltipTitle`, so an app that
+rewrites its tooltip (Sunshine, LibrePods) escapes the list and reappears.
+
+This patch inverts the default. Items are collapsed behind the caret unless
+they are explicitly pinned, and hiddenTrayIds is reinterpreted as that pin
+list (since DMS 2.0, inside SessionData's hide/show/isHidden functions). The per-item visibility toggle in the tray context menu keeps working --
+it now adds to / removes from the pin list instead -- so nothing in the UI
+changes except which side of the caret an unknown app lands on.
+
+Set DMS_TRAY_COLLAPSED_BY_DEFAULT=0 in the DMS environment to get the stock
+behaviour back without unpatching.
+
+DMS 1.6 embeds its whole QML tree inside the `dms` binary and extracts it to
+/run/user/$UID/danklinux-shell/<rev> at startup, so patching the reference copy
+under /usr/share does nothing -- that tree is not what runs. The patched tree
+lives in $HOME instead and DMS is pointed at it with DMS_SHELL_DIR; see
+~/.local/bin/dms-shell-sync, which rebuilds that tree from /usr/share and runs
+this script against it before every DMS start. No root needed.
+
+Usage: dms-tray-patch [shell-dir]      (default: ~/.local/share/dms-shell)
+Idempotent: exit 10 means it was already in place.
+"""
+
+import os
+import sys
+
+SHELL_DIR = (sys.argv[1] if len(sys.argv) > 1
+             else os.path.expanduser("~/.local/share/dms-shell"))
+TARGET = os.path.join(SHELL_DIR, "Common/SessionData.qml")
+
+MARKER = "trayCollapsedByDefault"
+
+# DMS 2.0 moved the bar to Modules/DBar and the per-item toggle into a shared
+# TrayMenuContent.qml (also used by the island), each calling SessionData
+# directly. So the inversion now lives in SessionData's three tray functions:
+# every caller -- bar filter, promote, context-menu toggle, island -- agrees
+# without being touched, and an empty hiddenTrayIds means "nothing pinned".
+EDITS = [
+    ("hideTrayId",
+     "    function hideTrayId(trayId) {\n"
+     "        if (!trayId)\n"
+     "            return;\n",
+     "    // Local patch (~/.local/bin/dms-tray-patch): tray items are collapsed by\n"
+     "    // default and hiddenTrayIds is reinterpreted as the list of items PINNED\n"
+     "    // to the bar. DMS_TRAY_COLLAPSED_BY_DEFAULT=0 restores stock behaviour.\n"
+     "    readonly property bool trayCollapsedByDefault: (Quickshell.env(\"DMS_TRAY_COLLAPSED_BY_DEFAULT\") || \"1\") !== \"0\"\n"
+     "\n"
+     "    function hideTrayId(trayId) {\n"
+     "        if (!trayId)\n"
+     "            return;\n"
+     "        if (trayCollapsedByDefault) {\n"
+     "            _unlistTrayId(trayId);\n"
+     "            return;\n"
+     "        }\n"
+     "        _listTrayId(trayId);\n"
+     "    }\n"
+     "\n"
+     "    function _listTrayId(trayId) {\n"),
+
+    ("showTrayId",
+     "    function showTrayId(trayId) {\n"
+     "        if (!trayId)\n"
+     "            return;\n"
+     "        hiddenTrayIds = hiddenTrayIds.filter(id => id !== trayId);\n"
+     "        saveSettings();\n"
+     "    }\n",
+     "    function showTrayId(trayId) {\n"
+     "        if (!trayId)\n"
+     "            return;\n"
+     "        if (trayCollapsedByDefault)\n"
+     "            _listTrayId(trayId);\n"
+     "        else\n"
+     "            _unlistTrayId(trayId);\n"
+     "    }\n"
+     "\n"
+     "    function _unlistTrayId(trayId) {\n"
+     "        hiddenTrayIds = hiddenTrayIds.filter(id => id !== trayId);\n"
+     "        saveSettings();\n"
+     "    }\n"),
+
+    ("isHiddenTrayId",
+     "    function isHiddenTrayId(trayId) {\n"
+     "        return trayId && hiddenTrayIds.indexOf(trayId) !== -1;\n"
+     "    }",
+     "    function isHiddenTrayId(trayId) {\n"
+     "        if (!trayId)\n"
+     "            return false;\n"
+     "        const listed = hiddenTrayIds.indexOf(trayId) !== -1;\n"
+     "        return trayCollapsedByDefault ? !listed : listed;\n"
+     "    }"),
+]
+
+
+def main():
+    try:
+        with open(TARGET, "r", encoding="utf-8") as fh:
+            src = fh.read()
+    except FileNotFoundError:
+        sys.exit(f"not found: {TARGET}")
+    except PermissionError:
+        sys.exit(f"not writable: {TARGET}")
+
+    if MARKER in src:
+        print("already patched")
+        return 10
+
+    for label, old, new in EDITS:
+        if src.count(old) != 1:
+            sys.exit(f"edit {label!r} matched {src.count(old)} times, expected 1.\n"
+                     "DMS changed upstream; the patch needs updating.")
+        src = src.replace(old, new, 1)
+
+    with open(TARGET, "w", encoding="utf-8") as fh:
+        fh.write(src)
+    print(f"patched {TARGET}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
