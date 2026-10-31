@@ -119,6 +119,12 @@ if [ -x "$HOME/.local/bin/ghostty-accent" ]; then
     "$HOME/.local/bin/ghostty-accent" >/dev/null 2>&1 || true
 fi
 
+# kitty (second terminal) split divider follows the accent too, same as
+# Ghostty's. Reloads running instances in place (SIGUSR1).
+if [ -x "$HOME/.local/bin/kitty-accent" ]; then
+    "$HOME/.local/bin/kitty-accent" >/dev/null 2>&1 || true
+fi
+
 # tmux status bar and pane borders follow the accent too. Re-sources the
 # config in a running server, so open sessions repaint in place.
 if [ -x "$HOME/.local/bin/tmux-accent" ]; then
