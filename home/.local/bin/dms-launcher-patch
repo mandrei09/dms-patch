@@ -625,6 +625,28 @@ else:
     print("DContextMenu.qml:             patched (key hook)")
     changed = True
 
+# ── 15b. Hyprland: the context menu window asked for NO keyboard focus under
+# the focus grab, so arrow keys stayed with the launcher's search field (and the
+# host's handleKey() forwarding calls a function DContextMenu doesn't have).
+# The menu window is already in the grab's window list, so OnDemand works.
+d15b = open(dcm).read()
+_old15b = """            if (PopoutManager.screenshotActive || CompositorService.useHyprlandFocusGrab)
+                return WlrKeyboardFocus.None;
+            return WlrKeyboardFocus.Exclusive;"""
+_new15b = """            if (PopoutManager.screenshotActive)
+                return WlrKeyboardFocus.None;
+            // dms-launcher-patch 15b: take keys under the Hyprland focus grab too.
+            if (CompositorService.useHyprlandFocusGrab)
+                return WlrKeyboardFocus.OnDemand;
+            return WlrKeyboardFocus.Exclusive;"""
+if "dms-launcher-patch 15b" in d15b:
+    print("DContextMenu.qml:             hyprland focus already patched")
+else:
+    assert d15b.count(_old15b) == 1, "DContextMenu.qml: keyboardFocus anchor not found/unique"
+    backup(dcm); open(dcm, "w").write(d15b.replace(_old15b, _new15b))
+    print("DContextMenu.qml:             patched (hyprland keyboard focus)")
+    changed = True
+
 # ── 16. (upstream since 2.0) the full launcher's dropdowns register with
 # the transient-surface tracker and hand focus back to the search field.
 

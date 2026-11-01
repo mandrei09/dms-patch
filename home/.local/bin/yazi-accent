@@ -40,6 +40,8 @@ cat > "$HOME/.config/yazi/theme.toml" <<EOF
 cwd           = { fg = "$a" }
 find_position = { fg = "$a", bg = "reset", bold = true, italic = true }
 border_style  = { fg = "$d" }
+# Code previews use the same Dark Modern palette as nvim.
+syntect_theme = "~/.config/yazi/dark-modern.tmTheme"
 
 [tabs]
 active   = { fg = "$k", bg = "$a", bold = true }
