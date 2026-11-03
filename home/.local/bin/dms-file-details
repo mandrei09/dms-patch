@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Describe one file for the DMS launcher details pane.
 #
-#   usage: dms-file-details PATH [PYGMENTS_STYLE]
+#   usage: dms-file-details PATH [STYLE]   (any non-empty STYLE = highlight)
 #
 # Prints a key=value block. Everything after a bare `HEAD<<` line is a raw
 # text excerpt; everything after `HTML<<` is Pygments-highlighted HTML with
@@ -63,37 +63,26 @@ case "$m" in
     *) exit 0 ;;
 esac
 
-# The pane scrolls, so read enough to be worth scrolling -- but cap bytes
-# FIRST so a huge single-line file cannot pull the whole thing through the
-# pipe before the line limit applies.
-excerpt=$(head -c 200000 -- "$p" 2>/dev/null | head -n 600)
-
-# Markdown is rendered as a document by the pane, not highlighted as source.
+# Text preview: highlight.py reads a HARD-capped head of the file (64 KB /
+# 150 lines / 400 cols; Markdown 24 KB) and prints Qt-RichText HTML in VS Code
+# Dark Modern -- the same palette as the spacebar previewer. Nothing here
+# reads the whole file, so a multi-GB log costs the same as a small one.
+# PREVIEW= tells the pane which kind of block it got.
+hl="$HOME/.local/share/dms-launcher-patch/highlight.py"
+mode=code
 case "$(printf '%s' "$p" | tr 'A-Z' 'a-z')" in
-    *.md|*.markdown) style="" ;;
+    *.md|*.markdown) mode=markdown ;;
 esac
-
-if [ -n "$style" ] && command -v pygmentize >/dev/null 2>&1; then
-    # -N picks a lexer from the filename; "text" means it could not, so fall
-    # back to content sniffing, which catches shebang scripts with no suffix.
-    lexer=$(pygmentize -N "$p" 2>/dev/null || echo text)
-    [ "$lexer" = "text" ] && set -- -g || set -- -l "$lexer"
-
-    # Highlighted output is far heavier for Qt to lay out than plain text
-    # (a span per token), so cap it well below the plain-text limit.
-    html=$(printf '%s\n' "$excerpt" | head -n 300 \
-        | pygmentize "$@" -f html -O noclasses=true,nowrap=true,style="$style" 2>/dev/null || true)
-
-    # No spans means the lexer found nothing worth colouring -- emit plain
-    # text rather than a RichText blob that renders identically but slower.
-    case "$html" in
-        *"<span"*)
-            echo "HTML<<"
-            printf '%s\n' "$html"
-            exit 0
-            ;;
-    esac
+if [ -n "$style" ] && [ -r "$hl" ]; then
+    html=$(timeout 3 /usr/bin/python3 -I "$hl" "$p" "$mode" 2>/dev/null || true)
+    if [ -n "$html" ]; then
+        echo "PREVIEW=$mode"
+        echo "HTML<<"
+        printf '%s\n' "$html"
+        exit 0
+    fi
 fi
 
+# Fallback (no helper / it failed): a plain capped excerpt.
 echo "HEAD<<"
-printf '%s\n' "$excerpt"
+head -c 65536 -- "$p" 2>/dev/null | head -n 150 | cut -c1-400

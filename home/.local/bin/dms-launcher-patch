@@ -29,6 +29,10 @@
 #      Force quit, Open .desktop file, Copy launch command, Launch on
 #      workspace…. Submenus drill down in place.
 #  12. The full launcher's sort / category dropdowns no longer close it.
+#  14. File/folder results use VS Code Material Icon Theme icons per type
+#      (FileIcons.js from ~/.local/share/dms-launcher-patch/gen-file-icons.py).
+#  13. File rows show long names/paths on ONE line, elided in the middle
+#      (extension and parent folders stay visible), paths with ~.
 #
 # DMS 1.6 embeds its QML tree in the `dms` binary and extracts it to
 # /run/user/$UID/danklinux-shell/<rev> at startup, so patching the reference
@@ -88,6 +92,22 @@ else
     cat "$EXTRA_SRC" > "$EXTRA"
     pane_changed=1
     echo "LauncherExtraActions.qml:     installed"
+fi
+
+# Per-file-type icons (patch 18): FileIcons.js is generated from VS Code's
+# Material Icon Theme by ~/.local/share/dms-launcher-patch/gen-file-icons.py,
+# which also copies the SVGs next to it (absolute paths in $HOME, so they
+# survive dms updates). No file -> stock material glyphs stay.
+ICONS="$BASE/FileIcons.js"
+ICONS_SRC="${DMS_ICONS_SRC:-$HOME/.local/share/dms-launcher-patch/FileIcons.js}"
+if [ -f "$ICONS_SRC" ]; then
+    if cmp -s "$ICONS_SRC" "$ICONS" 2>/dev/null; then
+        echo "FileIcons.js:                 unchanged"
+    else
+        cat "$ICONS_SRC" > "$ICONS"
+        pane_changed=1
+        echo "FileIcons.js:                 installed"
+    fi
 fi
 
 rc=0
@@ -704,6 +724,99 @@ for path in (standalone, connected):
 """, g, count=1)
     backup(path); open(path, "w").write(g)
     print(f"{name}: patched (popup-safe focus grab)")
+    changed = True
+
+# ── 17. long file names / paths: one line, elided in the MIDDLE ───────
+# Stock rows elide at the right, and only for plain text: once a query is
+# typed the name becomes RichText (match in <b>), where Qt ignores both
+# `elide` and `maximumLineCount`, so a long file name wrapped onto a second
+# line and shoved the path out of the row. File rows now measure the PLAIN
+# name/path with ElideMiddle -- the extension and the immediate parent
+# folders stay visible -- and re-apply the match highlight to what is left.
+# Paths are shown with ~ for $HOME. Other result types are untouched.
+row = os.path.join(os.path.dirname(transformers), "Components", "LauncherRow.qml")
+r = open(row).read()
+if "_fileRowElide" in r:
+    print("LauncherRow.qml:              already patched")
+else:
+    a_imp = 'import "../../../Common/htmlElide.js" as HtmlElide\n'
+    a_prop = "    property int flatIndex: -1\n"
+    a_name = '            text: root.item?._hName ?? root.item?.name ?? ""\n            textFormat: root.item?._hRich ? Text.RichText : Text.PlainText\n'
+    a_sub = '            text: root.item?._hRich ? HtmlElide.elideRichText(root.item._hSub ?? "", textColumn._richBudget) : (root.item?.subtitle ?? "")\n            textFormat: root.item?._hRich ? Text.RichText : Text.PlainText\n'
+    for nm, a in (("import", a_imp), ("flatIndex", a_prop), ("nameText", a_name), ("subText", a_sub)):
+        assert r.count(a) == 1, f"LauncherRow.qml: {nm} anchor not found/unique"
+    r = r.replace(a_imp, a_imp + "import Quickshell\n")
+    r = r.replace(a_prop, a_prop + '''
+    // patch 17 (_fileRowElide): file rows elide name and path in the middle.
+    readonly property bool _isFileRow: item?.type === "file"
+    readonly property string _subPlain: {
+        const s = String(item?.subtitle ?? "");
+        const h = Quickshell.env("HOME") || "";
+        return _isFileRow && h && (s === h || s.startsWith(h + "/")) ? "~" + s.substring(h.length) : s;
+    }
+    // Bold the query match inside an already-elided plain string. The match
+    // text comes from the controller's own <b>...</b> markup.
+    function _rehighlight(plain, rich) {
+        const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        const m = /<b>([\\s\\S]*?)<\\/b>/.exec(String(rich || ""));
+        if (!m)
+            return esc(plain);
+        const needle = HtmlElide.stripHtmlTags(m[1]).toLowerCase();
+        const i = needle ? plain.toLowerCase().indexOf(needle) : -1;
+        if (i < 0)
+            return esc(plain);
+        return esc(plain.substring(0, i)) + "<b>" + esc(plain.substring(i, i + needle.length)) + "</b>" + esc(plain.substring(i + needle.length));
+    }
+    readonly property bool _nameHasHit: _isFileRow && !!item?._hRich && /<b>/.test(item?._hName ?? "")
+    readonly property bool _subHasHit: _isFileRow && !!item?._hRich && /<b>/.test(item?._hSub ?? "")
+
+    TextMetrics {
+        id: _fileRowElide
+        font: nameText.font
+        elide: Qt.ElideMiddle
+        elideWidth: Math.max(1, textColumn.width)
+        text: root._isFileRow ? String(root.item?.name ?? "") : ""
+    }
+
+    TextMetrics {
+        id: _fileRowSubElide
+        font: subText.font
+        elide: Qt.ElideMiddle
+        elideWidth: Math.max(1, textColumn.width)
+        text: root._isFileRow ? root._subPlain : ""
+    }
+''')
+    r = r.replace(a_name, '''            text: root._isFileRow ? (root._nameHasHit ? root._rehighlight(_fileRowElide.elidedText, root.item._hName) : _fileRowElide.elidedText) : (root.item?._hName ?? root.item?.name ?? "")
+            textFormat: root._isFileRow ? (root._nameHasHit ? Text.RichText : Text.PlainText) : (root.item?._hRich ? Text.RichText : Text.PlainText)
+''')
+    r = r.replace(a_sub, '''            text: root._isFileRow ? (root._subHasHit ? root._rehighlight(_fileRowSubElide.elidedText, root.item._hSub) : _fileRowSubElide.elidedText) : (root.item?._hRich ? HtmlElide.elideRichText(root.item._hSub ?? "", textColumn._richBudget) : (root.item?.subtitle ?? ""))
+            textFormat: root._isFileRow ? (root._subHasHit ? Text.RichText : Text.PlainText) : (root.item?._hRich ? Text.RichText : Text.PlainText)
+''')
+    backup(row); open(row, "w").write(r)
+    print("LauncherRow.qml:              patched (middle-elided file names/paths)")
+    changed = True
+
+# ── 18. VS Code (Material Icon Theme) icons per file type / folder name ─
+# Only when FileIcons.js was installed above; otherwise leave stock glyphs.
+t = open(transformers).read()
+icons_js = os.path.join(os.path.dirname(transformers), "FileIcons.js")
+if "FileIcons.iconFor" in t:
+    print("ItemTransformers.js:          file-type icons already patched")
+elif not os.path.exists(icons_js):
+    print("ItemTransformers.js:          no FileIcons.js -- stock file icons")
+else:
+    a_imp = '.import "ControllerUtils.js" as Utils\n'
+    a_icon = '        icon: isDir ? "folder" : Utils.getFileIcon(filename),\n        iconType: "material",\n        section: "files",\n'
+    assert t.count(a_imp) == 1, "ItemTransformers.js: Utils import not found/unique"
+    assert t.count(a_icon) == 1, "ItemTransformers.js: file icon lines not found/unique"
+    t = t.replace(a_imp, a_imp + '.import "FileIcons.js" as FileIcons\n')
+    t = t.replace(a_icon, '''        // patch 18: coloured per-type SVG (svg: prefix -> DSVGIcon, cached)
+        icon: FileIcons.iconFor(filename, isDir) ? "svg:" + FileIcons.iconFor(filename, isDir) : (isDir ? "folder" : Utils.getFileIcon(filename)),
+        iconType: FileIcons.iconFor(filename, isDir) ? "image" : "material",
+        section: "files",
+''')
+    backup(transformers); open(transformers, "w").write(t)
+    print("ItemTransformers.js:          patched (file-type icons)")
     changed = True
 
 # ── 5. widen both launchers to fit the pane ───────────────────────────
