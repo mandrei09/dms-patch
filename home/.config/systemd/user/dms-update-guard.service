@@ -5,5 +5,5 @@ Description=Check local DMS customisations after a package change
 Type=oneshot
 # Let the whole apt transaction finish first (dpkg writes status many times).
 ExecStartPre=/bin/sleep 45
-ExecStart=%h/Documents/dms-update-guard/dms-update-check --notify
+ExecStart=%h/.local/bin/dms-update-check --notify
 SuccessExitStatus=1

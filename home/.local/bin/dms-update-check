@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Health check for the local DMS / Dux customisations after package updates.
+#
+# Every breakage on 2026-10-22 (DMS 1.6 -> 2.0) was silent: patches logged
+# "FAILED -- running unpatched" to the journal, `apt autoremove` took grim,
+# and a hardcoded DMS asset path drew stray letters instead of icons. This
+# turns those into one desktop notification.
+#
+# Run by:
+#   - dms.service ExecStartPost (drop-in guard.conf), after every DMS start;
+#   - dms-update-guard.path, whenever /var/lib/dpkg/status changes (any apt
+#     install / upgrade / autoremove).
+#
+# Usage: dms-update-check [--notify]   (exit 1 when something needs attention)
+# Report: ~/.cache/dms-update-guard/report.txt
+set -uo pipefail
+
+NOTIFY=0
+[ "${1:-}" = "--notify" ] && NOTIFY=1
+
+HOME_DIR="$HOME"
+OUT_DIR="$HOME_DIR/.cache/dms-update-guard"
+REPORT="$OUT_DIR/report.txt"
+mkdir -p "$OUT_DIR"
+
+problems=()
+add() { problems+=("$*"); }
+
+# ── 1. local DMS patches applied on the last DMS start ──────────────────
+# dms-shell-sync logs one "applied X" or "X FAILED" line per patch.
+since=$(systemctl --user show dms.service -p ActiveEnterTimestamp --value)
+if [ -n "$since" ] && [ "$since" != "n/a" ]; then
+    sync_log=$(journalctl --user -u dms.service --since "@$(( $(date -d "$since" +%s) - 60 ))" \
+        --no-pager -o cat 2>/dev/null | grep 'dms-shell-sync:')
+    while IFS= read -r l; do
+        [ -n "$l" ] && add "DMS patch: ${l#dms-shell-sync: }"
+    done < <(printf '%s\n' "$sync_log" | grep -E 'FAILED|not found, skipping')
+fi
+
+# ── 1b. dry-run the patches against the INSTALLED DMS ───────────────────
+# apt doesn't restart DMS, so after an update the running shell still has the
+# old patched tree and section 1 can't see a break until the next login. Build
+# a throwaway tree from the new /usr/share copy and apply every patch to it.
+SRC=/usr/share/quickshell/dms/quickshell
+DRY="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dms-update-guard/shell"
+if [ -f "$SRC/shell.qml" ] && command -v dms-shell-sync >/dev/null 2>&1; then
+    rm -rf -- "${DRY:?}"
+    mkdir -p "$DRY"
+    dry=$(DMS_SHELL_DIR="$DRY" DMS_SHELL_SYNC=1 dms-shell-sync 2>&1)
+    while IFS= read -r l; do
+        [ -n "$l" ] && add "DMS patch would fail on the installed DMS: ${l#dms-shell-sync: }"
+    done < <(printf '%s\n' "$dry" | grep -E 'FAILED|not found, skipping')
+    rm -rf -- "${DRY:?}"
+    # Binary newer than the running shell = an update that isn't live yet.
+    started=$(systemctl --user show dms.service -p ActiveEnterTimestamp --value)
+    if [ -n "$started" ] && [ "$started" != "n/a" ] \
+       && [ "$(stat -c %Y /usr/bin/dms)" -gt "$(date -d "$started" +%s)" ]; then
+        add "DMS was updated but the running shell is the old one; restart it: systemctl --user restart dms.service"
+    fi
+fi
+
+# ── 2. QML errors in the running shell and the overlays ─────────────────
+# Deprecation notices are reported separately (they only matter when they
+# name something our own files use).
+# Files the local patches touch or install, plus local plugins.
+OWN_FILES_RE='LauncherDetailsPane|LauncherExtraActions|ItemTransformers|DLauncherV2/Controller|LauncherContent|SpotlightLauncherContent|LauncherContextMenu|DContextMenu|DLauncherV2ModalHost|LauncherTab|SessionData|DgopService|CompositorService|LockNotificationsWidget|NotificationService|plugins/'
+for unit in dms snip altswitcher langswitcher; do
+    st=$(systemctl --user show "$unit.service" -p ActiveEnterTimestamp --value)
+    [ -z "$st" ] || [ "$st" = "n/a" ] && continue
+    if ! systemctl --user is-active --quiet "$unit.service"; then
+        add "$unit.service is not running"
+        continue
+    fi
+    errs=$(journalctl --user -u "$unit.service" --since "@$(date -d "$st" +%s)" --no-pager -o cat 2>/dev/null \
+        | sed 's/\x1b\[[0-9;]*m//g' \
+        | grep -E 'ERROR|TypeError|ReferenceError|is not a type|is not installed|Cannot assign|unavailable|Expected token|Failed to load' \
+        | grep -v 'Deprecation' | sort -u)
+    # Stock DMS logs plenty of its own null-dereference warnings; only errors in
+    # code we patch or own are ours to act on. Overlays are entirely ours.
+    if [ "$unit" = dms ]; then
+        errs=$(printf '%s\n' "$errs" | grep -E "$OWN_FILES_RE|Failed to load")
+    fi
+    errs=$(printf '%s\n' "$errs" | grep -v '^$' | head -5)
+    [ -n "$errs" ] && add "$unit QML errors: $(printf '%s' "$errs" | tr '\n' ' ' | cut -c1-300)"
+done
+
+# ── 3. our files using names DMS has deprecated ─────────────────────────
+OWN_QML=(
+    "$HOME_DIR/.local/share/dms-launcher-patch"
+    "$HOME_DIR/.config/dms/plugins"
+    "$HOME_DIR/.config/quickshell"
+)
+deps=$(journalctl --user -u dms.service -b --no-pager -o cat 2>/dev/null \
+    | grep -oE '\[Deprecation[^]]*\] [A-Za-z0-9_.]+ is deprecated' | awk '{print $2}' | sort -u)
+for name in $deps; do
+    # .repos = registry plugins' git checkouts: upstream's to fix, not ours.
+    hits=$(grep -rlw --include='*.qml' --include='*.js' --exclude-dir=.repos -- "$name" "${OWN_QML[@]}" 2>/dev/null | grep -v '\.bak' | head -3)
+    [ -n "$hits" ] && add "deprecated DMS name '$name' used in: $(echo $hits)"
+done
+
+# ── 4. commands and packages the local tooling needs ────────────────────
+# Must be installed AND marked manual, so `apt autoremove` can't take them.
+REQUIRED_PKGS=(grim slurp wl-clipboard tesseract-ocr tesseract-ocr-eng tesseract-ocr-ron
+    python3-cairo jq rsync poppler-utils libglib2.0-bin libgtk-3-bin file
+    libnotify-bin file-roller fd-find tmux zenity playerctl brightnessctl cliphist
+    pipewire-bin wireplumber openssh-client danksearch dux-files)
+for p in "${REQUIRED_PKGS[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+        add "package missing: $p (reinstall: pkexec apt-get install $p)"
+    elif apt-mark showauto "$p" 2>/dev/null | grep -qx "$p"; then
+        add "package only auto-installed, autoremove may take it: $p (fix: pkexec apt-mark manual $p)"
+    fi
+done
+for c in "$HOME_DIR/.local/bin/satty" /home/linuxbrew/.linuxbrew/bin/rg; do
+    [ -x "$c" ] || add "missing non-apt tool: $c"
+done
+
+# ── 5. hardcoded paths into DMS's own tree must still exist ────────────
+# Our files should not reach into /usr/share/quickshell/dms at all; any that
+# do are checked so a rename shows up here instead of as broken UI.
+SCAN=("$HOME_DIR/.config/quickshell" "$HOME_DIR/.config/dms/plugins" "$HOME_DIR/.local/share/dms-launcher-patch"
+      "$HOME_DIR/.config/systemd/user" "$HOME_DIR/.config/hypr")
+while IFS= read -r ref; do
+    path=${ref#file://}
+    [ -e "$path" ] || add "dangling DMS path: $ref"
+done < <(grep -rhoE --exclude='*.bak*' --exclude-dir=.repos "(file://)?/usr/share/quickshell/dms/[^\"' )]+" "${SCAN[@]}" 2>/dev/null \
+            | grep -v '\.bak' | sort -u)
+
+# Legacy DankMaterialShell dirs: only symlinks since 2.0; flag if a script still
+# leans on them once the symlinks are gone.
+for d in .config .cache .local/state; do
+    if [ ! -e "$HOME_DIR/$d/DankMaterialShell" ]; then
+        left=$(grep -rlE "$d/DankMaterialShell/" "$HOME_DIR/.local/bin" "${SCAN[@]}" 2>/dev/null | grep -v '\.bak' | head -3)
+        [ -n "$left" ] && add "~/$d/DankMaterialShell is gone but still referenced in: $(echo $left)"
+    fi
+done
+
+# ── 6. Dux Files wrapper ────────────────────────────────────────────────
+if [ -x /usr/bin/dfiles ]; then
+    want=$(stat -c '%Y %s' /usr/bin/dfiles)
+    have=$(cat "$HOME_DIR/.local/share/dfiles-shell/.source-stamp" 2>/dev/null)
+    last=$(tail -1 "$HOME_DIR/.cache/dfiles-wrapper.log" 2>/dev/null)
+    case "$last" in *"sync failed"*|*"no extracted tree"*)
+        [ "$want" != "$have" ] && add "dfiles patched UI not rebuilt for the installed dfiles (it rebuilds on the next start with no dfiles window open; log: ~/.cache/dfiles-wrapper.log)";;
+    esac
+fi
+
+# ── report ──────────────────────────────────────────────────────────────
+{
+    echo "dms-update-check $(date '+%F %T')"
+    if [ ${#problems[@]} -eq 0 ]; then
+        echo "OK -- nothing to do"
+    else
+        printf -- '- %s\n' "${problems[@]}"
+    fi
+} >"$REPORT"
+
+if [ ${#problems[@]} -eq 0 ]; then
+    rm -f "$OUT_DIR/last-notified"
+    exit 0
+fi
+
+cat "$REPORT"
+if [ "$NOTIFY" -eq 1 ]; then
+    # Don't repeat an identical notification on every dpkg run.
+    sum=$(printf '%s\n' "${problems[@]}" | sha1sum | cut -c1-12)
+    if [ "$(cat "$OUT_DIR/last-notified" 2>/dev/null)" != "$sum" ]; then
+        body=$(printf '• %s\n' "${problems[@]}" | head -8)
+        [ ${#problems[@]} -gt 8 ] && body+=$'\n'"…and $(( ${#problems[@]} - 8 )) more"
+        notify-send -a "DMS update guard" -u critical -i dialog-warning \
+            "Local DMS customisations need attention (${#problems[@]})" \
+            "$body"$'\n\n'"Full report: ~/.cache/dms-update-guard/report.txt" \
+            && echo "$sum" >"$OUT_DIR/last-notified"
+    fi
+fi
+exit 1

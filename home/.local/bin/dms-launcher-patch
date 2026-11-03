@@ -29,6 +29,21 @@
 #      Force quit, Open .desktop file, Copy launch command, Launch on
 #      workspace…. Submenus drill down in place.
 #  12. The full launcher's sort / category dropdowns no longer close it.
+#  21. Actions that open an app (VS Code, Neovim, Files, Ghostty, Open with…)
+#      show that app's icon, in the actions page and the popup.
+#  20. Apps: one "Uninstall…" for every install source (apt, Flatpak, Snap,
+#      Homebrew, AppImage, /opt, home folder, web apps) via DMS's own dialog.
+#  19. Actions ordered by how likely they are to be picked, one fixed
+#      ranking per result kind (file / folder / app); no separators.
+#  18. Tab / Right open the actions as a PAGE in place of the results list
+#      (LauncherInlineActions.qml); right-click keeps the popup.
+#  17. Action menu entries are numbered (1-9, 0, a-z; press to pick), and
+#      Tab opens that menu instead of the bottom action bar.
+#  16. Files: "Open in Neovim" (right-click menu + Tab action bar), via
+#      dms-launcher-action do nvim.
+#  15. Learned ranking (LearnedRank.js): remembers what you pick after each
+#      query (14-day half-life), re-ranks files by it, re-adds known files
+#      dsearch missed, and shows a "Top hit" above all sections.
 #  14. File/folder results use VS Code Material Icon Theme icons per type
 #      (FileIcons.js from ~/.local/share/dms-launcher-patch/gen-file-icons.py).
 #  13. File rows show long names/paths on ONE line, elided in the middle
@@ -107,6 +122,31 @@ if [ -f "$ICONS_SRC" ]; then
         cat "$ICONS_SRC" > "$ICONS"
         pane_changed=1
         echo "FileIcons.js:                 installed"
+    fi
+fi
+
+# Actions page (patch 22). Edit the source, not the copy.
+INLINE="$BASE/LauncherInlineActions.qml"
+INLINE_SRC="${DMS_INLINE_SRC:-$HOME/.local/share/dms-launcher-patch/LauncherInlineActions.qml}"
+[ -f "$INLINE_SRC" ] || { echo "missing $INLINE_SRC" >&2; exit 1; }
+if cmp -s "$INLINE_SRC" "$INLINE" 2>/dev/null; then
+    echo "LauncherInlineActions.qml:    unchanged"
+else
+    cat "$INLINE_SRC" > "$INLINE"
+    pane_changed=1
+    echo "LauncherInlineActions.qml:    installed"
+fi
+
+# Learned ranking library (patch 19). Edit the source, not the copy.
+LEARN="$BASE/LearnedRank.js"
+LEARN_SRC="${DMS_LEARN_SRC:-$HOME/.local/share/dms-launcher-patch/LearnedRank.js}"
+if [ -f "$LEARN_SRC" ]; then
+    if cmp -s "$LEARN_SRC" "$LEARN" 2>/dev/null; then
+        echo "LearnedRank.js:               unchanged"
+    else
+        cat "$LEARN_SRC" > "$LEARN"
+        pane_changed=1
+        echo "LearnedRank.js:               installed"
     fi
 fi
 
@@ -817,6 +857,663 @@ else:
 ''')
     backup(transformers); open(transformers, "w").write(t)
     print("ItemTransformers.js:          patched (file-type icons)")
+    changed = True
+
+# ── 19. learned ranking: query memory, recency, file re-rank, Top hit ──
+# Library: LearnedRank.js (copied in above). Data: ~/.local/state/dms-launcher-learn.json.
+#  a) every pick records (query, result); decays with a 14-day half-life
+#  b) apps/plugins/settings: Scorer gets a `learned` bonus via getFrecencyForItem
+#  c) files/folders: dsearch hits re-ranked by it (only under "Score" sort), and
+#     files picked before that dsearch's top 20 missed are re-added (checked to
+#     still exist first; not with an ext/folder filter active)
+#  d) a "Top hit" section above everything when one result clearly stands out
+lr_js = os.path.join(os.path.dirname(controller), "LearnedRank.js")
+c = open(controller).read()
+sc = open(os.path.join(os.path.dirname(controller), "Scorer.js")).read()
+scorer = os.path.join(os.path.dirname(controller), "Scorer.js")
+if "_learnPick" in c:
+    print("Controller.qml:               learned ranking already patched")
+elif not os.path.exists(lr_js):
+    print("Controller.qml:               no LearnedRank.js -- stock ranking")
+else:
+    a_imp = 'import "ItemTransformers.js" as Transform\n'
+    a_frec = '    function getFrecencyForItem(item) {\n'
+    a_exec = '        if (item.type !== "app")\n            recordItemUsage(item);\n'
+    a_files = '_applyFileSearchResults(aggregatedItems, effectiveType);'
+    a_flat = 'flatModel = Scorer.flattenSections(newSections);'
+    a_score = 'var usageBonus = frecencyData ? Math.min(frecencyData.usageCount * 50, Weights.frecency) : 0;'
+    for nm, a, src in (("import", a_imp, c), ("getFrecencyForItem", a_frec, c), ("executeItem usage", a_exec, c), ("file apply", a_files, c), ("Scorer usageBonus", a_score, sc)):
+        assert src.count(a) == 1, f"patch 19: {nm} anchor not found/unique"
+    assert c.count(a_flat) >= 5, "patch 19: flattenSections sites changed"
+
+    c = c.replace(a_imp, a_imp + 'import "LearnedRank.js" as Learned\n')
+    c = c.replace(a_exec, '        _learnPick(item);\n' + a_exec)
+    c = c.replace(a_files, '_learnFilesThenApply(aggregatedItems, effectiveType, fileQuery);')
+    c = re.sub(r'(?m)^(\s*)flatModel = Scorer\.flattenSections\(newSections\);',
+               lambda m: f"{m.group(1)}newSections = _withTopHit(newSections);\n{m.group(1)}flatModel = Scorer.flattenSections(newSections);", c)
+    c = c.replace(a_frec, r'''    // ── patch 19: learned ranking (LearnedRank.js) ────────────────────
+    FileView {
+        id: _learnFile
+
+        path: (Quickshell.env("HOME") || "") + "/.local/state/dms-launcher-learn.json"
+        blockLoading: true
+        onLoaded: Learned.load(_learnFile.text())
+        onLoadFailed: error => Learned.load("{}")
+    }
+
+    // Query the Files/Folders sections on screen belong to (see _withTopHit).
+    property string _fileSectionsQuery: ""
+
+    function _learnPick(item) {
+        if (!item || item.type === "plugin_browse" || item.type === "dmenu" || searchMode === "dmenu")
+            return;
+        if (Learned.record(searchQuery, item))
+            _learnFile.setText(Learned.dump());
+    }
+
+    // File hits: re-add known files dsearch missed (after checking they still
+    // exist), re-rank by learned use, then hand over to the stock apply.
+    function _learnFilesThenApply(items, effectiveType, fileQuery) {
+        const ver = _searchVersion;
+        const finish = function (extra) {
+            if (ver !== root._searchVersion)
+                return;
+            let all = extra.concat(items);
+            if ((fileSearchSort || "score") === "score")
+                all = Learned.rerankFiles(fileQuery, all);
+            root._fileSectionsQuery = root.searchQuery;
+            _applyFileSearchResults(all, effectiveType);
+        };
+        const have = {};
+        for (let i = 0; i < items.length; i++)
+            have[items[i].data?.path || items[i].id] = true;
+        const cand = (fileSearchExt || fileSearchFolder) ? [] : Learned.knownFiles(fileQuery, effectiveType, 5).filter(k => !have[k.path]);
+        if (cand.length === 0) {
+            finish([]);
+            return;
+        }
+        const dirOf = {};
+        cand.forEach(k => dirOf[k.path] = k.dir);
+        Proc.runCommand("launcher-learn-exists", ["sh", "-c", 'for p; do [ -e "$p" ] && printf "%s\\n" "$p"; done', "sh"].concat(cand.map(k => k.path)), function (stdout) {
+            const extra = String(stdout || "").split("\n").filter(p => p && dirOf[p] !== undefined).map(p => transformFileResult({
+                        path: p,
+                        score: 0,
+                        is_dir: dirOf[p]
+                    }));
+            finish(extra);
+        }, 0, 1500);
+    }
+
+    // Lift the one result your history clearly points at into a "Top hit"
+    // section above everything. Idempotent: an existing Top hit is first put
+    // back where it came from, so every rebuild re-decides from scratch.
+    function _withTopHit(secs) {
+        if (!secs)
+            return secs;
+        // Stock bug: an async plugin refresh (and any re-run of performSearch)
+        // rebuilds sections from apps+plugins only, wiping the Files/Folders
+        // sections dsearch delivered for this same query -- files vanished
+        // whenever an always-on plugin answered after dsearch. Carry them
+        // (and a Top hit lifted out of them) over while the query matches.
+        if (searchMode === "all" && _fileSectionsQuery === searchQuery && searchQuery && !secs.some(s => s.id === "files" || s.id === "folders")) {
+            const keep = sections.filter(s => s.id === "files" || s.id === "folders" || (s.id === "tophit" && s._origin && (s._origin.sectionId === "files" || s._origin.sectionId === "folders")));
+            if (keep.length) {
+                secs = secs.filter(s => s.id !== "tophit" || !(s._origin && (s._origin.sectionId === "files" || s._origin.sectionId === "folders"))).concat(keep);
+                secs.sort((a, b) => a.priority !== b.priority ? a.priority - b.priority : a.id.localeCompare(b.id));
+            }
+        }
+        let out = [];
+        let top = null;
+        for (let i = 0; i < secs.length; i++) {
+            if (secs[i].id === "tophit")
+                top = secs[i];
+            else
+                out.push(secs[i]);
+        }
+        if (top && top._origin && top.items.length) {
+            const o = top._origin;
+            const k = Learned.keyFor(top.items[0]);
+            let idx = out.findIndex(s => s.id === o.sectionId);
+            if (idx < 0 && o.section) {
+                out.push(o.section);
+                out.sort((a, b) => a.priority !== b.priority ? a.priority - b.priority : a.id.localeCompare(b.id));
+            } else if (idx >= 0 && !out[idx].items.some(x => Learned.keyFor(x) === k)) {
+                const its = out[idx].items.slice();
+                its.splice(Math.min(o.index, its.length), 0, top.items[0]);
+                out[idx] = Object.assign({}, out[idx], {
+                    items: its
+                });
+            }
+        }
+        if (searchMode === "dmenu" || !Learned.normQuery(searchQuery))
+            return out;
+        const keys = [];
+        for (let i = 0; i < out.length; i++)
+            for (let j = 0; j < out[i].items.length; j++)
+                keys.push(Learned.keyFor(out[i].items[j]));
+        const best = Learned.topHitKey(searchQuery, keys);
+        if (!best)
+            return out;
+        for (let si = 0; si < out.length; si++) {
+            const ii = out[si].items.findIndex(x => Learned.keyFor(x) === best);
+            if (ii < 0)
+                continue;
+            if (si === 0 && ii === 0)
+                return out; // already first: nothing to lift
+            const sec = out[si];
+            const it = sec.items[ii];
+            const rest = sec.items.slice();
+            rest.splice(ii, 1);
+            const origin = {
+                sectionId: sec.id,
+                index: ii,
+                section: rest.length === 0 ? sec : null
+            };
+            if (rest.length === 0)
+                out.splice(si, 1);
+            else
+                out[si] = Object.assign({}, sec, {
+                    items: rest
+                });
+            out.unshift({
+                id: "tophit",
+                title: "Top hit",
+                icon: "star",
+                priority: 0,
+                items: [it],
+                collapsed: false,
+                flatStartIndex: 0,
+                _origin: origin
+            });
+            return out;
+        }
+        return out;
+    }
+
+    function getFrecencyForItem(item) {
+        let f = _stockFrecency(item);
+        const lb = Learned.scorerBonus(searchQuery, item);
+        if (f)
+            f.learned = lb;
+        else if (lb > 0)
+            f = {
+                usageCount: 0,
+                learned: lb
+            };
+        return f;
+    }
+
+    function _stockFrecency(item) {
+''')
+    sc = sc.replace(a_score, a_score + "\n    usageBonus += (frecencyData && frecencyData.learned) ? frecencyData.learned : 0; // patch 19")
+    backup(controller); open(controller, "w").write(c)
+    backup(scorer); open(scorer, "w").write(sc)
+    print("Controller.qml + Scorer.js:   patched (learned ranking, Top hit)")
+    changed = True
+
+# ── 20. "Neovim" in the Tab action bar for files ──────────────────────
+# The right-click menu gets it from LauncherExtraActions.qml; the Tab bar is
+# built from the item's own `actions`, so it needs its own entry + dispatch.
+t = open(transformers).read()
+c = open(controller).read()
+if '"nvim"' in t:
+    print("ItemTransformers.js:          Neovim action already patched")
+else:
+    a_t = """        actions.push({
+            name: "Preview",
+            icon: "visibility",
+            action: "preview"
+        });
+"""
+    a_c = """        case "preview":
+            previewFile(item.data.path);
+            break;
+"""
+    assert t.count(a_t) == 1, "patch 20: Preview action anchor not found/unique"
+    assert c.count(a_c) == 1, "patch 20: preview case anchor not found/unique"
+    t = t.replace(a_t, a_t + """        actions.push({
+            name: "Open in Neovim",
+            icon: "edit_note",
+            action: "nvim"
+        });
+""")
+    c = c.replace(a_c, a_c + """        case "nvim":
+            // dms-launcher-action opens it in a new terminal, in its own scope.
+            Quickshell.execDetached({
+                command: ["dms-launcher-action", "do", "nvim", item.data.path]
+            });
+            break;
+""")
+    backup(transformers); open(transformers, "w").write(t)
+    backup(controller); open(controller, "w").write(c)
+    print("ItemTransformers.js + Controller.qml: patched (Neovim action)")
+    changed = True
+
+# ── 21. numbered menu entries + Tab opens the menu (no Tab action bar) ─
+# a) DContextMenu gains `numberedKeys` (default false, so every other DMS
+#    menu is unchanged): each selectable entry shows its key -- 1-9, 0, then
+#    a-z -- and pressing it activates that entry (submenus drill in, as on
+#    Enter). LauncherContextMenu turns it on.
+# b) Tab / Shift+Tab no longer open the stock action bar along the bottom;
+#    Tab opens the numbered menu instead (same as Right at the end of the
+#    query, but from anywhere in it). Both launcher layouts.
+dcm21 = os.path.join(os.path.dirname(ctxmenu), "../../Widgets/DContextMenu.qml")
+d = open(dcm21).read()
+if "numberedKeys" in d:
+    print("DContextMenu.qml:             numbered keys already patched")
+else:
+    a_prop = "    property bool keyboardNavigable: false\n"
+    a_keys = """                if (root.handleKeyHook(event)) {
+                    event.accepted = true;
+                    return;
+                }
+"""
+    a_row = """                                        DIcon {
+                                            name: menuItemDelegate.modelData?.icon ?? ""
+                                            size: Theme.iconSizeMedium
+                                            color: menuRow.contentColor
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+"""
+    a_textw = "width: parent.width - (Theme.iconSizeMedium + Theme.spacingS) * (trailingIcon.visible ? 2 : 1)"
+    a_width = "menuTextMetrics.width + Theme.iconSize + Theme.spacingS * 5"
+    for nm, a in (("keyboardNavigable prop", a_prop), ("key hook", a_keys), ("row icon", a_row), ("text width", a_textw), ("menu width", a_width)):
+        assert d.count(a) == 1, f"patch 21: DContextMenu {nm} anchor not found/unique"
+    d = d.replace(a_prop, a_prop + """    // patch 21: show 1-9, 0, a-z on entries; pressing one activates it.
+    property bool numberedKeys: false
+    // Width DKeycap takes for one character (its implicitHeight is 2x font).
+    readonly property real _keyColW: numberedKeys ? Math.round(Theme.fontSizeSmall * 2) : 0
+
+    function keyLabelFor(itemIndex) {
+        if (itemIndex < 9)
+            return String(itemIndex + 1);
+        if (itemIndex === 9)
+            return "0";
+        if (itemIndex < 36)
+            return String.fromCharCode(65 + itemIndex - 10);
+        return "";
+    }
+
+    function itemIndexForKey(text) {
+        if (!/^[0-9a-z]$/.test(text))
+            return -1;
+        if (text === "0")
+            return 9;
+        if (text >= "1" && text <= "9")
+            return Number(text) - 1;
+        return 10 + text.charCodeAt(0) - 97;
+    }
+""")
+    d = d.replace(a_keys, a_keys + """                if (root.numberedKeys && !(event.modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier))) {
+                    const ki = root.itemIndexForKey(String(event.text || "").toLowerCase());
+                    if (ki >= 0 && ki < root.visibleItemCount) {
+                        root.keyboardNavigation = true;
+                        root.selectedMenuIndex = ki;
+                        root.activateSelected();
+                        event.accepted = true;
+                        return;
+                    }
+                }
+""")
+    a_trail = """                                    DIcon {
+                                        id: trailingIcon
+"""
+    assert d.count(a_trail) == 1, "patch 21: DContextMenu trailing icon anchor not found/unique"
+    # Same pattern as DMS's own power menu (PowerMenuView): a DKeycap on the
+    # right of the row, tinted with the row's content colour.
+    d = d.replace(a_trail, """                                    DKeycap {
+                                        visible: root.numberedKeys && text.length > 0
+                                        text: root.keyLabelFor(menuItemDelegate.itemIndex)
+                                        textColor: menuRow.selected ? menuRow.contentColor : Theme.onSurfaceVariant
+                                        opacity: menuRow.itemEnabled ? 1 : 0.5
+                                        anchors.right: parent.right
+                                        anchors.rightMargin: Theme.spacingS + (trailingIcon.visible ? Theme.iconSizeMedium + Theme.spacingS : 0)
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+
+""" + a_trail)
+    d = d.replace(a_textw, "width: parent.width - (Theme.iconSizeMedium + Theme.spacingS) * (trailingIcon.visible ? 2 : 1) - (root.numberedKeys ? root._keyColW + Theme.spacingS : 0)")
+    d = d.replace(a_width, a_width + " + (numberedKeys ? _keyColW + Theme.spacingL * 2 : 0)")
+    backup(dcm21); open(dcm21, "w").write(d)
+    print("DContextMenu.qml:             patched (numbered keys)")
+    changed = True
+
+l = open(ctxmenu).read()
+if "numberedKeys" in l:
+    print("LauncherContextMenu.qml:      numbered keys already on")
+else:
+    a = '    keyboardNavigable: true\n'
+    assert l.count(a) == 1, "patch 21: LauncherContextMenu keyboardNavigable anchor"
+    l = l.replace(a, a + '    numberedKeys: true // patch 21\n')
+    backup(ctxmenu); open(ctxmenu, "w").write(l)
+    print("LauncherContextMenu.qml:      patched (numbered keys on)")
+    changed = True
+
+for name, path, open_call in (
+        ("LauncherContent.qml", fullcontent,
+         """                contextMenu.showInline(controller.selectedItem); // patch 22 page"""),
+        ("SpotlightLauncherContent.qml", content,
+         """                contextMenu.showInline(root.controller.selectedItem); // patch 22 page""")):
+    t = open(path).read()
+    if "patch 21" in t:
+        print(f"{name}: Tab -> menu already patched")
+        continue
+    sel = "controller.selectedItem" if name == "LauncherContent.qml" else "root.controller.selectedItem"
+    pat = re.compile(r"(        case Qt\.Key_Tab:\n)            if \(!hasCtrl && actionPanel\.hasActions\) \{\n                actionPanel\.expanded \? actionPanel\.cycleAction\(\) : actionPanel\.show\(\);\n            \}\n(            event\.accepted = true;\n)?            return;\n        case Qt\.Key_Backtab:\n            if \(!hasCtrl && actionPanel\.hasActions\) \{\n                actionPanel\.expanded \? actionPanel\.cycleAction\(true\) : actionPanel\.show\(\);\n            \}\n(            event\.accepted = true;\n)?            return;\n")
+    m = pat.findall(t)
+    assert len(m) == 1, f"patch 21: {name} Tab/Backtab block not found/unique"
+    t = pat.sub(lambda mm: f"""        case Qt.Key_Tab:
+            // patch 21/22: Tab opens the numbered actions page in place of
+            // the results; the stock action bar along the bottom never shows.
+            if (!hasCtrl && contextMenu.hasContextMenuActions({sel})) {{
+{open_call}
+            }}
+            event.accepted = true;
+            return;
+        case Qt.Key_Backtab:
+            event.accepted = true;
+            return;
+""", t)
+    backup(path); open(path, "w").write(t)
+    print(f"{name}: patched (Tab -> numbered menu)")
+    changed = True
+
+# ── 22. actions page replaces the results list (Tab / Right) ───────────
+# LauncherInlineActions.qml (copied in above) draws LauncherContextMenu's
+# entries in place of the results list; the list hides while
+# `inlineMode` is set. Mouse right-click still opens the popup.
+dcm22 = os.path.join(os.path.dirname(ctxmenu), "../../Widgets/DContextMenu.qml")
+d = open(dcm22).read()
+if "inlineMode" in d:
+    print("DContextMenu.qml:             inline mode already patched")
+else:
+    a_prop = "    property bool keyboardNavigable: false\n"
+    a_hide = "    function hide() {\n        if (!renderActive)\n            return;\n"
+    for nm, a in (("prop", a_prop), ("hide", a_hide)):
+        assert d.count(a) == 1, f"patch 22: DContextMenu {nm} anchor not found/unique"
+    d = d.replace(a_prop, a_prop + "    // patch 22: entries shown as a page in the launcher instead of a popup.\n    property bool inlineMode: false\n")
+    d = d.replace(a_hide, "    function hide() {\n        inlineMode = false; // patch 22: activating an entry leaves the page too\n        if (!renderActive)\n            return;\n")
+    backup(dcm22); open(dcm22, "w").write(d)
+    print("DContextMenu.qml:             patched (inline mode)")
+    changed = True
+
+l = open(ctxmenu).read()
+if "function showInline" in l:
+    print("LauncherContextMenu.qml:      showInline already patched")
+else:
+    a = "    numberedKeys: true // patch 21\n"
+    assert l.count(a) == 1, "patch 22: LauncherContextMenu numberedKeys anchor (patch 21 must run first)"
+    l = l.replace(a, a + """
+    // patch 22: open as the launcher's actions page instead of a popup.
+    function showInline(spotlightItem) {
+        if (!spotlightItem?.data || !hasContextMenuActions(spotlightItem))
+            return;
+        item = spotlightItem;
+        extraActions.fetch(spotlightItem);
+        selectedMenuIndex = 0;
+        keyboardNavigation = true;
+        inlineMode = true;
+    }
+""")
+    backup(ctxmenu); open(ctxmenu, "w").write(l)
+    print("LauncherContextMenu.qml:      patched (showInline)")
+    changed = True
+
+for name, path, list_anchor, key_anchor, right_old, right_new, sel in (
+        ("LauncherContent.qml", fullcontent,
+         "                ResultsList {\n                    id: resultsList\n",
+         "    Keys.onPressed: event => {\n        if (editMode) {\n",
+         "showContextMenu(controller.selectedItem, rightLocal.x, rightLocal.y, true);",
+         "contextMenu.showInline(controller.selectedItem);",
+         "root.controller.selectedItem"),
+        ("SpotlightLauncherContent.qml", content,
+         "        ResultsList {\n            id: resultsList\n",
+         "    function _handleKey(event) {\n",
+         "_showContextMenu(root.controller.selectedItem, rightPos.x, rightPos.y, true);",
+         "contextMenu.showInline(root.controller.selectedItem);",
+         "root.controller.selectedItem")):
+    t = open(path).read()
+    if "LauncherInlineActions {" in t:
+        print(f"{name}: actions page already patched")
+        continue
+    for nm, a in (("ResultsList", list_anchor), ("key handler", key_anchor), ("Right-arrow menu", right_old)):
+        assert t.count(a) == 1, f"patch 22: {name} {nm} anchor not found/unique"
+    ind = list_anchor[:len(list_anchor) - len(list_anchor.lstrip())]
+    t = t.replace(list_anchor, f"""{ind}// patch 22: the action menu as a page, in place of the results list.
+{ind}LauncherInlineActions {{
+{ind}    id: inlineActions
+{ind}    anchors.fill: resultsList
+{ind}    menu: contextMenu
+{ind}    item: {sel}
+{ind}}}
+
+""" + list_anchor + f"{ind}    visible: !contextMenu.inlineMode\n")
+    t = t.replace(key_anchor, key_anchor.split("\n")[0] + "\n" + """        if (inlineActions.handleKey(event)) { // patch 22
+            event.accepted = true;
+            return;
+        }
+""" + "\n".join(key_anchor.split("\n")[1:]))
+    t = t.replace(right_old, right_new)
+    backup(path); open(path, "w").write(t)
+    print(f"{name}: patched (actions page)")
+    changed = True
+
+# ── 23. actions ordered by how likely they are to be picked ───────────
+# One fixed ranking per result kind (file / folder / app), lowest index =
+# most likely, set once by hand (user asked). The stock category grouping
+# (separators) goes: the order IS the grouping now. Submenus keep their own
+# order (Back first); plugin results keep the plugin's order. Unlisted
+# entries (an app's own desktop actions such as "New Window") take the
+# `@other` slot; anything destructive-looking that is unlisted sorts last.
+l = open(ctxmenu).read()
+if "_rankActions" in l:
+    print("LauncherContextMenu.qml:      action ranking already patched")
+else:
+    a = "    menuItems: {\n"
+    assert l.count(a) == 1, "patch 23: LauncherContextMenu menuItems anchor not found/unique"
+    l = l.replace(a, """    // patch 23: entries ordered by likelihood (see _actionRank).
+    menuItems: _rankActions(_rawMenuItems)
+
+    // [label or label prefix, rank]. "@sub:" = only the submenu variant of
+    // that label; "@other" = rank for anything unlisted. Longest match wins.
+    readonly property var _actionRank: ({
+            "file": [["Extract here", 1], ["Open in VS Code", 2], ["Open in Neovim", 3], ["Copy path", 4], ["Open folder", 5], ["Preview", 6], ["Show in Files", 7], ["@sub:Open with…", 8], ["Copy name", 9], ["Copy contents", 10], ["Copy file", 11], ["Open with…", 12], ["@other", 50], ["Move to Trash", 99]],
+            "dir": [["Open in VS Code", 1], ["Open in terminal", 2], ["Copy path", 3], ["Open in tmux", 4], ["Open on ", 5], ["Open remote in browser", 5], ["Show in Files", 6], ["Open folder", 7], ["Copy remote URL", 8], ["Copy name", 9], ["Copy folder", 10], ["@sub:Open with…", 11], ["Open with…", 12], ["@other", 50]],
+            "app": [["Focus window", 1], ["@other", 2], ["Launch on workspace…", 3], ["Launch", 4], ["Quit", 5], ["Launch on dGPU", 6], ["Copy launch command", 7], ["Open .desktop file", 8], ["Edit App", 9], ["Hide App", 10], ["Pin to Dock", 11], ["Unpin from Dock", 11], ["Force quit", 98], ["Uninstall", 99]]
+        })
+
+    // patch 25: actions that open a specific app show that app's icon.
+    // [label prefix, icon spec] -- spec as LauncherExtraActions.resolveAppIcon.
+    readonly property var _actionAppIcon: [
+        ["Open in VS Code", "desktop:com.microsoft.VSCode|desktop:code|vscode"],
+        ["Open in Neovim", "desktop:nvim|/home/linuxbrew/.linuxbrew/share/icons/hicolor/128x128/apps/nvim.png"],
+        ["Show in Files", "desktop:org.gnome.Nautilus"],
+        ["Open folder", "desktop:org.gnome.Nautilus"],
+        ["Open in terminal", "desktop:com.mitchellh.ghostty"],
+        ["Open in tmux", "desktop:com.mitchellh.ghostty"],
+        ["Extract here", "desktop:org.gnome.FileRoller"],
+        ["Open .desktop file", "desktop:org.gnome.TextEditor"],
+        ["Launch on dGPU", "nvidia-settings"],
+        ["Open on GitLab", "fileicon:gitlab.svg"],
+        ["Open on Azure DevOps", "fileicon:azure.svg"],
+        ["Open on Bitbucket", "fileicon:bitbucket.svg"],
+        ["Open on GitHub", "desktop:brave-browser"],
+        ["Open remote in browser", "desktop:brave-browser"],
+        ["Focus window", "@app"],
+        ["Launch on workspace", "@app"],
+        ["Launch", "@app"]
+    ]
+
+    function _withAppIcon(e) {
+        if (!e || e.type !== "item" || e.appIconValue !== undefined)
+            return e;
+        const t = String(e.text || "");
+        let spec = "", len = -1;
+        for (const r of _actionAppIcon)
+            if (t.startsWith(r[0]) && r[0].length > len) {
+                spec = r[1];
+                len = r[0].length;
+            }
+        // An app's own desktop actions ("New Window"...) arrive with the
+        // generic play_arrow glyph: they launch the app, so show its icon.
+        if (!spec && item?.type === "app" && (e.icon || "play_arrow") === "play_arrow")
+            spec = "@app";
+        if (!spec || (spec === "@app" && item?.type !== "app"))
+            return e;
+        const v = extraActions.resolveAppIcon(spec, item);
+        return v ? Object.assign({}, e, { appIconValue: v }) : e;
+    }
+
+    function _rankActions(list) {
+        if (extraActions.subMenu || !item || !Array.isArray(list))
+            return list;
+        const cat = item.type === "file" ? (item.data?.is_dir ? "dir" : "file") : item.type === "app" && !item.isCore ? "app" : "";
+        const table = _actionRank[cat];
+        if (!table)
+            return list;
+        let other = 50;
+        for (const r of table)
+            if (r[0] === "@other")
+                other = r[1];
+        const rank = e => {
+            const t = String(e.text || "");
+            const isSub = e.extra?.kind === "submenu";
+            let best = null, bestLen = -1;
+            for (const r of table) {
+                let k = r[0];
+                if (k === "@other")
+                    continue;
+                if (k.startsWith("@sub:")) {
+                    if (!isSub)
+                        continue;
+                    k = k.substring(5);
+                } else if (isSub && table.some(x => x[0] === "@sub:" + k)) {
+                    continue;
+                }
+                if (t.startsWith(k) && k.length > bestLen) {
+                    best = r[1];
+                    bestLen = k.length;
+                }
+            }
+            if (best !== null)
+                return best;
+            return e.isDestructive ? 97 : other;
+        };
+        // "Open with…" twice (stock app-chooser dialog + our submenu): keep
+        // the submenu, keep the dialog only when there is no submenu.
+        const hasSubOpenWith = list.some(e => e.extra?.kind === "submenu" && String(e.text || "").startsWith("Open with"));
+        return list.map((e, i) => ({ e: e, i: i }))
+            .map(x => ({ e: _withAppIcon(x.e), i: x.i })) // patch 25
+            .filter(x => x.e.type !== "separator")
+            .filter(x => !(hasSubOpenWith && x.e.extra?.kind !== "submenu" && String(x.e.text || "").startsWith("Open with")))
+            .sort((a, b) => (rank(a.e) - rank(b.e)) || (a.i - b.i))
+            .map(x => x.e);
+    }
+
+    readonly property var _rawMenuItems: {
+""")
+    backup(ctxmenu); open(ctxmenu, "w").write(l)
+    print("LauncherContextMenu.qml:      patched (actions ordered by likelihood)")
+    changed = True
+
+# ── 24. Uninstall for every install source, through DMS's own dialog ───
+# The launcher's "Uninstall…" (LauncherExtraActions) gets a plan from
+# `dms-launcher-action uninstall-plan`; DMS's existing Flatpak flow is
+# generalised to carry it: same confirm modal (title/message from the plan),
+# same progress / success / failure toasts, same app-list refresh -- but the
+# process runs `dms-launcher-action uninstall-run PLAN`. The stock
+# Flatpak-only menu entry is dropped (ours covers Flatpak too).
+shell_root = os.path.normpath(os.path.join(os.path.dirname(controller), "..", ".."))
+ass = os.path.join(shell_root, "Services", "AppSearchService.qml")
+dsh = os.path.join(shell_root, "DMSShell.qml")
+
+a = open(ass).read()
+if "requestUninstallAny" in a:
+    print("AppSearchService.qml:         uninstall-any already patched")
+else:
+    a_req = "    function requestUninstallFlatpak(appId, appName, flatpakId) {\n"
+    a_cmd = '        flatpakUninstallProc.command = ["flatpak", "uninstall", "-y", "--app", flatpakId];\n'
+    for nm, x in (("requestUninstallFlatpak", a_req), ("uninstall command", a_cmd)):
+        assert a.count(x) == 1, f"patch 24: AppSearchService {nm} anchor not found/unique"
+    a = a.replace(a_req, """    // patch 24: any install source; `plan` from dms-launcher-action
+    // uninstall-plan rides through the Flatpak flow as "plan:<json>".
+    function requestUninstallAny(appId, appName, plan) {
+        if (!plan)
+            return;
+        uninstallAppConfirmRequested(appId, appName, "plan:" + JSON.stringify(plan));
+    }
+
+""" + a_req)
+    a = a.replace(a_cmd, """        flatpakUninstallProc.command = String(flatpakId).startsWith("plan:") // patch 24
+            ? ["dms-launcher-action", "uninstall-run", String(flatpakId).substring(5)]
+            : ["flatpak", "uninstall", "-y", "--app", flatpakId];
+""")
+    backup(ass); open(ass, "w").write(a)
+    print("AppSearchService.qml:         patched (uninstall any source)")
+    changed = True
+
+d = open(dsh).read()
+if "patch 24" in d:
+    print("DMSShell.qml:                 uninstall dialog already patched")
+else:
+    a_title = '                        title: I18n.tr("Uninstall %1?", "modal title for app uninstallation").arg(appName),\n                        message: I18n.tr("%1 will be removed from your system.", "modal confirmation text for uninstalling an app").arg(appName),\n'
+    assert d.count(a_title) == 1, "patch 24: DMSShell uninstall dialog anchor not found/unique"
+    d = d.replace(a_title, """                        // patch 24: plans from the launcher say exactly what goes.
+                        title: String(flatpakId).startsWith("plan:") ? (JSON.parse(String(flatpakId).substring(5)).title || I18n.tr("Uninstall %1?", "modal title for app uninstallation").arg(appName)) : I18n.tr("Uninstall %1?", "modal title for app uninstallation").arg(appName),
+                        message: String(flatpakId).startsWith("plan:") ? (JSON.parse(String(flatpakId).substring(5)).message || "") : I18n.tr("%1 will be removed from your system.", "modal confirmation text for uninstalling an app").arg(appName),
+""")
+    backup(dsh); open(dsh, "w").write(d)
+    print("DMSShell.qml:                 patched (uninstall dialog shows the plan)")
+    changed = True
+
+l = open(ctxmenu).read()
+if "patch 24" in l:
+    print("LauncherContextMenu.qml:      stock Flatpak uninstall already dropped")
+else:
+    x = "        if (isFlatpakApp && flatpakAppId)\n"
+    assert l.count(x) == 1, "patch 24: stock Flatpak uninstall anchor not found/unique"
+    l = l.replace(x, "        if (false && isFlatpakApp && flatpakAppId) // patch 24: our Uninstall… covers every source\n")
+    backup(ctxmenu); open(ctxmenu, "w").write(l)
+    print("LauncherContextMenu.qml:      patched (stock Flatpak uninstall dropped)")
+    changed = True
+
+# ── 25. app icons on actions that open a specific app (popup too) ──────
+# Entries may carry `appIconValue` (set by LauncherContextMenu /
+# LauncherExtraActions); DContextMenu draws it with AppIconRenderer instead
+# of the material glyph. Entries without it are unchanged.
+dcm25 = os.path.join(os.path.dirname(ctxmenu), "../../Widgets/DContextMenu.qml")
+d = open(dcm25).read()
+if "appIconValue" in d:
+    print("DContextMenu.qml:             app icons already patched")
+else:
+    a_icon = """                                        DIcon {
+                                            name: menuItemDelegate.modelData?.icon ?? ""
+                                            size: Theme.iconSizeMedium
+                                            color: menuRow.contentColor
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+"""
+    assert d.count(a_icon) == 1, "patch 25: DContextMenu row icon anchor not found/unique"
+    d = d.replace(a_icon, """                                        DIcon {
+                                            visible: !menuItemDelegate.modelData?.appIconValue // patch 25
+                                            name: menuItemDelegate.modelData?.icon ?? ""
+                                            size: Theme.iconSizeMedium
+                                            color: menuRow.contentColor
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+
+                                        AppIconRenderer {
+                                            visible: !!menuItemDelegate.modelData?.appIconValue
+                                            width: Theme.iconSizeMedium
+                                            height: Theme.iconSizeMedium
+                                            iconSize: Theme.iconSizeMedium
+                                            iconValue: menuItemDelegate.modelData?.appIconValue ?? ""
+                                            fallbackText: ""
+                                            anchors.verticalCenter: parent.verticalCenter
+                                        }
+""")
+    backup(dcm25); open(dcm25, "w").write(d)
+    print("DContextMenu.qml:             patched (app icons)")
     changed = True
 
 # ── 5. widen both launchers to fit the pane ───────────────────────────

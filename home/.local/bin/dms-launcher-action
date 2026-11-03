@@ -4,6 +4,8 @@
     dms-launcher-action menu file PATH
     dms-launcher-action menu app DESKTOP_ID [WM_CLASS] [EXEC]
     dms-launcher-action do ACTION ARGS...
+    dms-launcher-action uninstall-plan DESKTOP_ID   (JSON: what would be removed; removes nothing)
+    dms-launcher-action uninstall-run PLAN_JSON
 
 `menu` prints JSON that LauncherExtraActions.qml (installed by
 dms-launcher-patch) turns into menu entries: the apps registered for a
@@ -170,6 +172,19 @@ def do(action, args):
         spawn(["nautilus", "--select", p])
     elif action == "vscode":
         spawn(["code", p])
+    elif action == "nvim":
+        # New terminal window (xdg-terminal-exec -> Ghostty +new-window),
+        # started in the file's folder so LazyVim picks the right project
+        # root. cd inside the shell: Ghostty's single instance ignores
+        # --working-directory. nvim is brew's, linked into ~/.local/bin.
+        nvim = shutil.which("nvim") or os.path.join(HOME, ".local/bin/nvim")
+        # `set title` so the window is named after the file, not "sh".
+        # Own systemd scope: if Ghostty is not running yet, the instance this
+        # starts would otherwise live in dms.service's cgroup and die on the
+        # next DMS restart.
+        scope = ["systemd-run", "--user", "--scope", "--quiet", "--"] if shutil.which("systemd-run") else []
+        spawn(scope + ["xdg-terminal-exec", "sh", "-c", 'cd -- "$1" && exec "$2" --cmd "set title" -- "$3"', "sh",
+               os.path.dirname(p) or "/", nvim, p])
     elif action == "open-with":
         # args: DESKTOP_ID PATH
         spawn(["gtk-launch", a[0], a[1]])
@@ -229,6 +244,155 @@ def do(action, args):
         sys.exit(2)
 
 
+# ── uninstall, whatever the source ──────────────────────────────────────
+# uninstall-plan works out WHAT would be removed and HOW; the launcher shows
+# its title/message in DMS's own confirm dialog, then hands the plan back to
+# uninstall-run. Nothing is removed by uninstall-plan. All root steps run in
+# ONE pkexec call (one password prompt); user-owned files go to the Trash.
+APP_ROOT_PARENTS = ("Games", "Applications", "apps", "Apps", "opt", ".local/opt")
+
+
+def tilde(p):
+    return p.replace(HOME, "~", 1) if p.startswith(HOME) else p
+
+
+def desktop_field(path, key):
+    try:
+        in_entry = False
+        for ln in open(path, errors="replace"):
+            ln = ln.strip()
+            if ln.startswith("["):
+                in_entry = ln == "[Desktop Entry]"
+            elif in_entry and ln.startswith(key + "="):
+                return ln[len(key) + 1:]
+    except OSError:
+        pass
+    return ""
+
+
+def remove_file_step(path):
+    """Trash what we own; rm (as root) what we don't."""
+    if path.startswith(HOME + "/"):
+        return {"argv": ["gio", "trash", "--", path], "root": False}
+    return {"argv": ["rm", "-rf", "--", path], "root": True}
+
+
+def uninstall_plan(did):
+    mod = app_details()
+    hits = mod.find_desktop(did)
+    if not hits:
+        return {"error": "No .desktop file found for " + did}
+    desk = hits[0]
+    name = desktop_field(desk, "Name") or did
+    exec_line = desktop_field(desk, "Exec")
+    steps, lines = [], []
+    title = "Uninstall " + name + "?"
+
+    # Chromium-family web app (PWA): its binary belongs to the browser's
+    # package, so "uninstalling the package" would remove the whole browser.
+    if re.search(r"--app-id=|--app=", exec_line) and desk.startswith(HOME):
+        return {"kind": "Web app", "title": "Remove web app " + name + "?",
+                "message": "Removes the web app's launcher (" + tilde(desk) + ").\nThe browser itself stays installed.",
+                "steps": [remove_file_step(desk)]}
+
+    # A user .desktop that shadows a system one is an override: uninstall the
+    # app it overrides, and drop the override too.
+    src_desk = desk
+    if desk.startswith(HOME) and len(hits) > 1:
+        src_desk = hits[1]
+        steps.append(remove_file_step(desk))
+        lines.append("Your launcher override " + tilde(desk) + " is moved to the Trash.")
+    src = mod.source_of(src_desk, desktop_field(src_desk, "Exec") or exec_line)
+    kind = src.get("kind", "Unknown")
+    sname = src.get("name", "")
+
+    if kind == "Flatpak":
+        steps.insert(0, {"argv": ["flatpak", "uninstall", "-y", "--noninteractive", "--app", sname], "root": False})
+        lines.insert(0, "Flatpak app " + sname + (" " + src["version"] if src.get("version") else "") + " is uninstalled (its data in ~/.var/app stays).")
+    elif kind == "Snap":
+        steps.insert(0, {"argv": ["snap", "remove", sname], "root": True})
+        lines.insert(0, "Snap " + sname + " is removed.")
+    elif kind == "apt":
+        sim = run(["apt-get", "-s", "remove", sname], timeout=20)
+        removed = re.findall(r"^Remv (\S+)", sim, re.M)
+        if not removed:
+            return {"error": "apt would not remove " + sname + ":\n" + "\n".join(sim.splitlines()[-3:])}
+        steps.insert(0, {"argv": ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "remove", "-y", sname], "root": True})
+        others = [r for r in removed if r != sname]
+        lines.insert(0, "apt package " + sname + " is removed" + (", together with " + str(len(others)) + " package(s) that depend on it:\n  " + ", ".join(others) if others else ".") )
+    elif kind == "Homebrew":
+        argv = mod.program_argv(desktop_field(src_desk, "Exec") or exec_line)
+        real = os.path.realpath(shutil.which(argv[0]) or argv[0]) if argv else ""
+        m = re.search(r"/Cellar/([^/]+)/", real)
+        formula = m.group(1) if m else sname
+        steps.insert(0, {"argv": ["/home/linuxbrew/.linuxbrew/bin/brew", "uninstall", formula], "root": False})
+        lines.insert(0, "Homebrew formula " + formula + " is uninstalled.")
+    elif kind == "AppImage":
+        steps.insert(0, remove_file_step(sname))
+        lines.insert(0, "The AppImage " + tilde(sname) + " is deleted.")
+        if src_desk == desk:
+            steps.append(remove_file_step(desk))
+            lines.append("Its launcher " + tilde(desk) + " is removed.")
+    elif kind == "Manual install":
+        steps.insert(0, {"argv": ["rm", "-rf", "--", sname], "root": True})
+        lines.insert(0, "The folder " + sname + " is deleted.")
+        if src_desk == desk:
+            steps.append(remove_file_step(desk))
+            lines.append("Its launcher " + tilde(desk) + " is removed.")
+    elif kind == "In home folder":
+        prog = os.path.expanduser(sname)
+        rel = os.path.relpath(prog, HOME).split(os.sep)
+        target = prog
+        for par in APP_ROOT_PARENTS:
+            pp = par.split("/")
+            if rel[:len(pp)] == pp and len(rel) > len(pp) + 1:
+                target = os.path.join(HOME, *rel[:len(pp) + 1])
+                break
+        if "/dotfiles/" in os.path.realpath(prog) or target in (HOME, HOME + "/"):
+            target = None
+        if target:
+            steps.insert(0, remove_file_step(target))
+            lines.insert(0, ("The folder " if os.path.isdir(target) else "The program ") + tilde(target) + " is moved to the Trash.")
+        if src_desk == desk:
+            steps.append(remove_file_step(desk))
+            lines.append("Its launcher " + tilde(desk) + " is removed.")
+    else:
+        if not desk.startswith(HOME):
+            argv = mod.program_argv(exec_line)
+            binp = shutil.which(argv[0]) if argv else None
+            if binp and binp.startswith("/usr/local/"):
+                steps = [{"argv": ["rm", "-f", "--", binp], "root": True}, remove_file_step(desk)]
+                lines = ["The program " + binp + " and its launcher " + desk + " are deleted."]
+            else:
+                return {"error": "Can't tell how " + name + " was installed, so there is nothing safe to remove.\n" + desk}
+        else:
+            steps = [remove_file_step(desk)]
+            lines = ["Only the launcher " + tilde(desk) + " is removed: its install source could not be determined."]
+    return {"kind": kind, "title": title, "message": "\n".join(lines), "steps": steps}
+
+
+def uninstall_run(plan):
+    steps = plan.get("steps") or []
+    root = [s["argv"] for s in steps if s.get("root")]
+    user = [s["argv"] for s in steps if not s.get("root")]
+    errors = []
+    if root:
+        import shlex
+        script = " && ".join(" ".join(shlex.quote(a) for a in argv) for argv in root)
+        r = subprocess.run(["pkexec", "sh", "-c", script], capture_output=True, text=True)
+        if r.returncode != 0:
+            msg = "Authentication was cancelled." if r.returncode in (126, 127) else (r.stderr.strip().splitlines() or ["exit " + str(r.returncode)])[-1]
+            print(msg, file=sys.stderr)
+            sys.exit(r.returncode or 1)
+    for argv in user:
+        r = subprocess.run(argv, capture_output=True, text=True)
+        if r.returncode != 0:
+            errors.append((r.stderr.strip().splitlines() or [" ".join(argv) + " failed"])[-1])
+    if errors:
+        print("\n".join(errors), file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     argv = sys.argv[1:]
     if len(argv) >= 3 and argv[0] == "menu" and argv[1] == "file":
@@ -236,6 +400,10 @@ def main():
     elif len(argv) >= 3 and argv[0] == "menu" and argv[1] == "app":
         rest = argv[2:] + ["", ""]
         print(json.dumps(menu_app(rest[0], rest[1], rest[2])))
+    elif len(argv) >= 2 and argv[0] == "uninstall-plan":
+        print(json.dumps(uninstall_plan(argv[1])))
+    elif len(argv) >= 2 and argv[0] == "uninstall-run":
+        uninstall_run(json.loads(argv[1]))
     elif len(argv) >= 2 and argv[0] == "do":
         do(argv[1], argv[2:])
     else:
