@@ -889,6 +889,9 @@ else:
     c = c.replace(a_imp, a_imp + 'import "LearnedRank.js" as Learned\n')
     c = c.replace(a_exec, '        _learnPick(item);\n' + a_exec)
     c = c.replace(a_files, '_learnFilesThenApply(aggregatedItems, effectiveType, fileQuery);')
+    a_limit = "                limit: 20,\n                fuzzy: true,\n"
+    assert c.count(a_limit) == 1, "patch 19: dsearch limit anchor not found/unique"
+    c = c.replace(a_limit, "                limit: 60, // patch 19: room for folder priority to re-rank\n                fuzzy: true,\n")
     c = re.sub(r'(?m)^(\s*)flatModel = Scorer\.flattenSections\(newSections\);',
                lambda m: f"{m.group(1)}newSections = _withTopHit(newSections);\n{m.group(1)}flatModel = Scorer.flattenSections(newSections);", c)
     c = c.replace(a_frec, r'''    // ── patch 19: learned ranking (LearnedRank.js) ────────────────────
@@ -903,6 +906,18 @@ else:
 
     // Query the Files/Folders sections on screen belong to (see _withTopHit).
     property string _fileSectionsQuery: ""
+
+    // Folder priority, a plain JSON the user edits (no GUI); live-reloaded.
+    FileView {
+        id: _prioFile
+
+        path: (Quickshell.env("HOME") || "") + "/.config/dms/launcher-folder-priority.json"
+        blockLoading: true
+        watchChanges: true
+        onFileChanged: reload()
+        onLoaded: Learned.loadPriority(_prioFile.text(), Quickshell.env("HOME") || "")
+        onLoadFailed: error => Learned.loadPriority("{}", "")
+    }
 
     function _learnPick(item) {
         if (!item || item.type === "plugin_browse" || item.type === "dmenu" || searchMode === "dmenu")
@@ -921,6 +936,10 @@ else:
             let all = extra.concat(items);
             if ((fileSearchSort || "score") === "score")
                 all = Learned.rerankFiles(fileQuery, all);
+            // dsearch is asked for 60 so prioritised folders can climb in;
+            // show the best 20 files and 20 folders, as before.
+            let nf = 0, nd = 0;
+            all = all.filter(it => it.data?.is_dir ? (nd++ < 20) : (nf++ < 20));
             root._fileSectionsQuery = root.searchQuery;
             _applyFileSearchResults(all, effectiveType);
         };

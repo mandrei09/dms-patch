@@ -1,0 +1,9 @@
+[Unit]
+Description=Exclude git-ignored build/dependency folders from dsearch (secrets stay findable)
+After=dsearch.service
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/dsearch-ignore-sync
+Nice=10
+IOSchedulingClass=idle

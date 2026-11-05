@@ -23,8 +23,12 @@ DST=${DMS_SHELL_DIR:-$HOME/.local/share/dms-shell}
 
 mkdir -p "$DST"
 # --delete so a file dropped upstream (or a patch leftover) doesn't linger.
-# The .bak-* files are debris the patch scripts leave in $SRC; don't copy them.
-rsync -a --delete --exclude '*.bak-*' "$SRC/" "$DST/"
+# $SRC holds debris from before 2026-09-20, when patches were applied to
+# /usr/share directly: .bak-* files and the DMS 1.x Modals/DankLauncherV2
+# folder (not package files). Skip them, and --delete-excluded drops them from
+# $DST too -- otherwise every start left another full set of backups behind
+# (1,800 files by 2026-11-05).
+rsync -a --delete --delete-excluded --exclude '*.bak-*' --exclude '/Modals/DankLauncherV2/' "$SRC/" "$DST/"
 
 # Patch scripts exit 10 when already applied, which cannot happen on a freshly
 # mirrored tree -- treat anything but 0 as a real failure. A failed patch is

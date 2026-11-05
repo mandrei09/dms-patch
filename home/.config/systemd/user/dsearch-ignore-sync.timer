@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily dsearch-ignore-sync (rebuilds the index only when the exclude list changes)
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target

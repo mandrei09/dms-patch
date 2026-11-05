@@ -1,0 +1,152 @@
+#!/usr/bin/python3
+"""Keep dsearch (the DMS launcher's file search) out of git-ignored build and
+dependency folders, while secrets stay findable.
+
+    dsearch-ignore-sync              update the exclude list, rebuild if it changed
+    dsearch-ignore-sync --dry-run    show what would change, touch nothing
+
+How it decides:
+  * Every git repo under ROOTS is asked which FOLDERS it ignores
+    (`git ls-files --others --ignored --exclude-standard --directory`).
+  * Only folders are ever excluded, never files -- so .env, *.pem, *.key and
+    other ignored-but-wanted files stay searchable.
+  * A folder is excluded only if it is clearly generated: a dot-folder, a
+    cache/build/dist/coverage/... style name, or 200+ files.
+  * Never excluded: names that look secret (secret, key, cert, env, ssh, ...)
+    and any folder that itself contains secret-like files.
+
+dsearch's exclude_dirs match a folder NAME anywhere (no per-path rules), so
+the names this tool adds are tracked in auto-excludes.json; a later run can
+retract them without touching the hand-written part of the list. Excluding
+already-indexed files needs an index rebuild (dsearch never drops them on its
+own), which happens automatically when the list changes (~1 minute).
+"""
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+
+HOME = os.path.expanduser("~")
+CONFIG = os.path.join(HOME, ".config/danksearch/config.toml")
+STATE = os.path.join(HOME, ".config/danksearch/auto-excludes.json")
+INDEX = os.path.join(HOME, ".cache/danksearch/index")
+ROOTS = [os.path.join(HOME, d) for d in ("Work", "dotfiles", "Documents", "Games")]
+REPO_DEPTH = 8  # deepest real repo today is 5 levels down; 8 leaves headroom
+MIN_FILES = 200
+
+PROTECT = re.compile(r"secret|key|cert|credential|env|ssh|gpg|vault|pem|token|passw|wallet|private", re.I)
+GENERATED = re.compile(r"(^|[._-])(cache|caches|build|builds|dist|out|tmp|temp|coverage|generated|"
+                       r"artifacts|deps|packages|logs?|debug|release)$", re.I)
+SECRET_FILE = re.compile(r"^\.env(\..+)?$|\.(pem|key|pfx|p12|jks|keystore|asc|gpg)$|^id_(rsa|ed25519|ecdsa)", re.I)
+
+
+def find_repos(skip=()):
+    """Git repos under ROOTS, not descending into already-excluded folders
+    (node_modules, bin, obj, ...) -- that keeps a deep walk fast."""
+    skip = set(skip) | {"node_modules", ".venv", "venv"}
+    repos = []
+    for root in ROOTS:
+        base = root.count(os.sep)
+        for d, subs, _ in os.walk(root):
+            if ".git" in subs:
+                repos.append(d)
+                subs.remove(".git")
+            if d.count(os.sep) - base >= REPO_DEPTH:
+                subs[:] = []
+            subs[:] = [s for s in subs if s not in skip]
+    return repos
+
+
+def scan(path, limit=20000):
+    """(file count, has secret-like file) -- stops counting at `limit`."""
+    n, secret = 0, False
+    for _, _, files in os.walk(path):
+        n += len(files)
+        if not secret and any(SECRET_FILE.search(f) for f in files):
+            secret = True
+        if n >= limit:
+            break
+    return n, secret
+
+
+def read_excludes(text):
+    m = re.search(r"exclude_dirs\s*=\s*\[(.*?)\]", text, re.S)
+    if not m:
+        sys.exit("no exclude_dirs in " + CONFIG)
+    raw = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))  # TOML-escaped text, kept as-is
+    return m, raw
+
+
+def main():
+    dry = "--dry-run" in sys.argv
+    text = open(CONFIG).read()
+    m, raw = read_excludes(text)
+    try:
+        prev_auto = set(json.load(open(STATE)).get("names", []))
+    except (OSError, ValueError):
+        prev_auto = set()
+    manual = [r for r in raw if r not in prev_auto]
+    manual_set = set(manual)
+
+    found, why = set(), {}
+    for repo in find_repos(manual_set):
+        try:
+            out = subprocess.run(["git", "-C", repo, "ls-files", "--others", "--ignored",
+                                  "--exclude-standard", "--directory", "--no-empty-directory"],
+                                 capture_output=True, text=True, timeout=60).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for ln in out.splitlines():
+            if not ln.endswith("/"):
+                continue  # files are never excluded
+            rel = ln.rstrip("/")
+            if any(part in manual_set for part in rel.split("/")):
+                continue  # already covered by an excluded parent
+            name = os.path.basename(rel)
+            if PROTECT.search(name):
+                continue
+            path = os.path.join(repo, rel)
+            files, secret = scan(path)
+            if secret:
+                continue
+            if name.startswith(".") or GENERATED.search(name) or files >= MIN_FILES:
+                found.add(name)
+                why.setdefault(name, []).append(f"{path.replace(HOME, '~', 1)} ({files}{'+' if files >= 20000 else ''} files)")
+
+    auto = sorted(n for n in found if n not in manual_set)
+    new = manual + auto
+    added = [n for n in auto if n not in prev_auto]
+    dropped = sorted(prev_auto - set(auto))
+    for n in added:
+        print(f"+ {n:24s} {why[n][0]}" + (f"  (+{len(why[n]) - 1} more)" if len(why[n]) > 1 else ""))
+    for n in dropped:
+        print(f"- {n:24s} no longer ignored anywhere")
+    if new == raw:
+        print("exclude list unchanged")
+        return
+    if dry:
+        print("(dry run: nothing written)")
+        return
+
+    body = ", ".join(f'"{r}"' for r in new)
+    text = text[:m.start(1)] + body + text[m.end(1):]
+    shutil.copy(CONFIG, CONFIG + ".bak-" + time.strftime("%Y%m%d-%H%M%S"))
+    open(CONFIG, "w").write(text)
+    json.dump({"generated": time.strftime("%Y-%m-%d %H:%M"), "names": auto,
+               "from": {n: why[n] for n in auto}}, open(STATE, "w"), indent=2)
+    print(f"config updated ({len(added)} added, {len(dropped)} removed); rebuilding the index...")
+    subprocess.run(["systemctl", "--user", "stop", "dsearch.service"])
+    old = INDEX + ".old"
+    shutil.rmtree(old, ignore_errors=True)
+    if os.path.exists(INDEX):
+        os.rename(INDEX, old)
+    subprocess.run(["systemctl", "--user", "start", "dsearch.service"])
+    shutil.rmtree(old, ignore_errors=True)
+    print("dsearch restarted; the index refills in about a minute")
+
+
+if __name__ == "__main__":
+    main()
