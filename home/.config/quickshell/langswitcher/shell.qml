@@ -33,8 +33,8 @@ ShellRoot {
     readonly property int hideMs: 900
     readonly property int animMs: 120
     readonly property int cardWidth: 380
-    // Clear of the DMS bar, which sits on the top edge.
-    readonly property int marginTop: 70
+    // Bottom-right, clear of the DMS bar on the bottom edge (60 px tall).
+    readonly property int marginBottom: 70
     readonly property int marginRight: 16
 
     // ── state ──────────────────────────────────────────────────────────
@@ -190,11 +190,11 @@ ShellRoot {
         mask: Region {}
 
         anchors {
-            top: true
+            bottom: true
             right: true
         }
         margins {
-            top: root.marginTop
+            bottom: root.marginBottom
             right: root.marginRight
         }
         implicitWidth: root.cardWidth
