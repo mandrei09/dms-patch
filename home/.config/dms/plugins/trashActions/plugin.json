@@ -1,0 +1,14 @@
+{
+    "id": "trashActions",
+    "name": "Trash",
+    "description": "File actions in the main search: open the Trash in Files, or empty it after a confirmation dialog. Type trash, bin, recycle, deleted or empty.",
+    "version": "1.0.0",
+    "author": "local",
+    "icon": "delete",
+    "type": "launcher",
+    "capabilities": ["launcher"],
+    "component": "./TrashActions.qml",
+    "trigger": "trash",
+    "requires_dms": ">=1.4.0",
+    "permissions": ["process"]
+}
