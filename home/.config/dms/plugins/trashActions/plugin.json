@@ -1,7 +1,7 @@
 {
     "id": "trashActions",
     "name": "Trash",
-    "description": "File actions in the main search: open the Trash in Files, or empty it after a confirmation dialog. Type trash, bin, recycle, deleted or empty.",
+    "description": "Type trash to open the Trash in Files, or empty it after a confirmation dialog.",
     "version": "1.0.0",
     "author": "local",
     "icon": "delete",

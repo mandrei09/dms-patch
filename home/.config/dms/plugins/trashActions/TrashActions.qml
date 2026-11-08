@@ -3,9 +3,8 @@ import Quickshell
 import Quickshell.Io
 import qs.Services
 
-// Two file actions in the main launcher search (plugin_settings.json sets
-// noTrigger, so no prefix is needed): typing "trash", "bin", "empty", ...
-// offers "Open Trash" and "Empty Trash".
+// `trash` switches the launcher to this plugin (like `ssh`, `qr`) and offers
+// "Open Trash" and "Empty Trash"; words after it filter (`trash em`).
 //
 // Plugin items always close the launcher, so the confirmation for emptying is
 // a zenity dialog rather than a second launcher step. gio handles the trash on
@@ -14,12 +13,11 @@ Item {
     id: root
 
     property var pluginService: null
-    property string trigger: ""
+    property string trigger: "trash"
 
     signal itemsChanged
 
     readonly property string pluginId: "trashActions"
-    readonly property var keywords: ["trash", "bin", "recycle", "deleted", "empty", "wastebasket"]
 
     // -1 = not counted yet
     property int itemCount: -1
@@ -69,15 +67,6 @@ Item {
         onExited: count.running = true
     }
 
-    function _matches(query) {
-        const words = (query || "").toLowerCase().trim().split(/\s+/).filter(w => w);
-        if (words.length === 0)
-            return false;
-        // Every typed word must be a prefix of some keyword, so "tra", "empty
-        // trash" and "bin" match, but ordinary app searches don't.
-        return words.every(w => keywords.some(k => k.startsWith(w)) && (w.length >= 3 || words.length > 1));
-    }
-
     function _countText() {
         if (itemCount < 0)
             return "";
@@ -85,13 +74,11 @@ Item {
     }
 
     function getItems(query) {
-        if (!_matches(query))
-            return [];
         if (Date.now() - _countedAt > 3000 && !count.running)
             count.running = true;
 
         const c = _countText();
-        return [
+        const items = [
             {
                 name: "Open Trash",
                 icon: "material:delete",
@@ -111,6 +98,9 @@ Item {
                 categories: ["Files"]
             }
         ];
+        const words = (query || "").toLowerCase().trim().split(/\s+/).filter(w => w);
+        const hits = items.filter(it => words.every(w => it.name.toLowerCase().includes(w)));
+        return hits.length ? hits : items;
     }
 
     function executeItem(item) {
