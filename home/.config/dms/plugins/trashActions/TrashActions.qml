@@ -2,13 +2,15 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Services
+import qs.Modals.Common
 
 // `trash` switches the launcher to this plugin (like `ssh`, `qr`) and offers
 // "Open Trash" and "Empty Trash"; words after it filter (`trash em`).
 //
-// Plugin items always close the launcher, so the confirmation for emptying is
-// a zenity dialog rather than a second launcher step. gio handles the trash on
-// every mounted drive, not just ~/.local/share/Trash.
+// Plugin items always close the launcher, so emptying asks in DMS's own
+// ConfirmModal (themed like the rest of the shell; Cancel is preselected, and
+// Enter, Escape or a click outside all cancel). gio handles the trash on every
+// mounted drive, not just ~/.local/share/Trash.
 Item {
     id: root
 
@@ -22,11 +24,26 @@ Item {
     // -1 = not counted yet
     property int itemCount: -1
     property real _countedAt: 0
+    // set when "Empty Trash" was chosen: ask once the fresh count is in
+    property bool _confirmPending: false
 
     // Same reason as sshHosts: keep launched apps out of dms.service's cgroup
     // so a DMS restart doesn't take them down.
     function scoped(argv) {
         return ["systemd-run", "--user", "--scope", "--collect", "--quiet", "--"].concat(argv);
+    }
+
+    function _what(n) {
+        return n === 1 ? "1 item" : n + " items";
+    }
+
+    function _toast(msg, error) {
+        if (typeof ToastService === "undefined")
+            return;
+        if (error)
+            ToastService.showError("Trash", msg);
+        else
+            ToastService.showInfo("Trash", msg);
     }
 
     Component.onCompleted: count.running = true
@@ -41,36 +58,56 @@ Item {
                 root._countedAt = Date.now();
                 if (root.pluginService)
                     root.pluginService.requestLauncherUpdate(root.pluginId);
+                if (root._confirmPending) {
+                    root._confirmPending = false;
+                    root._askToEmpty();
+                }
             }
         }
     }
 
-    // Asks first, empties only on "Empty Trash", then reports and recounts.
     Process {
         id: emptier
-        command: ["sh", "-c", `
-            n=$(gio info -a trash::item-count trash:/// | sed -n 's/.*item-count: *//p')
-            if [ "\${n:-0}" = 0 ]; then
-                notify-send -a Trash -i user-trash "Trash is already empty"
-                exit 0
-            fi
-            if [ "$n" = 1 ]; then what="1 item"; else what="$n items"; fi
-            zenity --question --title="Empty Trash" --icon=user-trash-full \\
-                --text="Permanently delete $what in the Trash?\\n\\nThis cannot be undone." \\
-                --ok-label="Empty Trash" --cancel-label="Cancel" --default-cancel || exit 0
-            if gio trash --empty; then
-                notify-send -a Trash -i user-trash "Trash emptied" "Deleted $what"
+        property int deleting: 0
+        command: ["gio", "trash", "--empty"]
+        onExited: code => {
+            if (code === 0)
+                root._toast("Trash emptied · deleted " + root._what(deleting), false);
             else
-                notify-send -a Trash -u critical -i dialog-error "Could not empty the Trash"
-            fi
-        `]
-        onExited: count.running = true
+                root._toast("Could not empty the Trash", true);
+            count.running = true;
+        }
+    }
+
+    ConfirmModal {
+        id: confirm
+    }
+
+    function _askToEmpty() {
+        const n = itemCount;
+        if (n === 0) {
+            _toast("Trash is already empty", false);
+            return;
+        }
+        confirm.showWithOptions({
+            title: "Empty Trash?",
+            message: "Permanently delete " + (n > 0 ? _what(n) : "everything") + " in the Trash? This cannot be undone.",
+            confirmText: "Empty Trash",
+            cancelText: "Cancel",
+            danger: true,
+            onConfirm: () => {
+                if (emptier.running)
+                    return;
+                emptier.deleting = n;
+                emptier.running = true;
+            }
+        });
     }
 
     function _countText() {
         if (itemCount < 0)
             return "";
-        return itemCount === 0 ? "empty" : itemCount === 1 ? "1 item" : itemCount + " items";
+        return itemCount === 0 ? "empty" : _what(itemCount);
     }
 
     function getItems(query) {
@@ -81,7 +118,7 @@ Item {
         const items = [
             {
                 name: "Open Trash",
-                icon: "material:delete",
+                icon: itemCount > 0 ? "user-trash-full" : "user-trash",
                 comment: "Show deleted files in Files" + (c ? " · " + c : ""),
                 action: "open",
                 enterLabel: "Open the Trash in Files",
@@ -90,7 +127,7 @@ Item {
             },
             {
                 name: "Empty Trash",
-                icon: "material:delete_forever",
+                icon: "user-trash",
                 comment: itemCount === 0 ? "Trash is already empty" : "Permanently delete everything in the Trash" + (c ? " · " + c : "") + " · asks first",
                 action: "empty",
                 enterLabel: "Empty the Trash (asks for confirmation)",
@@ -104,9 +141,14 @@ Item {
     }
 
     function executeItem(item) {
-        if (item?.action === "open")
+        if (item?.action === "open") {
             Quickshell.execDetached(root.scoped(["nautilus", "--new-window", "trash:///"]));
-        else if (item?.action === "empty" && !emptier.running)
-            emptier.running = true;
+        } else if (item?.action === "empty" && !emptier.running) {
+            // Recount first so the dialog shows the current number; the dialog
+            // opens when the count arrives, after the launcher has closed.
+            _confirmPending = true;
+            if (!count.running)
+                count.running = true;
+        }
     }
 }
