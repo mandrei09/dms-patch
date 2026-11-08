@@ -1,34 +1,62 @@
 #!/usr/bin/env bash
 # Rebuild the patched DMS QML tree that DMS_SHELL_DIR points at.
 #
-# DMS 1.6 embeds its whole QML tree inside the 75 MB `dms` binary and extracts
-# it to /run/user/$UID/danklinux-shell/<rev> at startup. Editing the reference
-# copy under /usr/share/quickshell/dms does nothing -- that tree ships with the
-# package but is never loaded. `dms run -c DIR` (env: DMS_SHELL_DIR) is the
-# supported way to run a modified UI.
+# DMS embeds its whole QML tree inside the `dms` binary and extracts it to
+# /run/user/$UID/dms-shell/<rev> at startup. `dms run -c DIR` (env:
+# DMS_SHELL_DIR) is the supported way to run a modified UI.
 #
-# So: mirror /usr/share (which is a byte-identical copy of the embedded tree,
-# and is replaced in lockstep with the binary on every `dms` update) into
-# $SHELL_DIR, then re-apply the local patches. Running this before every DMS
-# start means an update can never leave a stale or half-patched shell behind --
-# there is nothing to remember to re-run.
+# So: take the stock tree, mirror it into $DST, then re-apply the local
+# patches. Running this before every DMS start means an update can never
+# leave a stale or half-patched shell behind -- there is nothing to remember
+# to re-run.
+#
+# Stock tree source (2026-11-08): extracted from the binary itself with
+# dux-extract-ui and cached per binary (mtime+size), because the
+# /usr/share/quickshell/dms copy is not guaranteed -- 2.1.1 dropped the greeter
+# from it and the -git packages no longer ship it. /usr/share is only the
+# fallback. DMS_SHELL_SRC overrides both (dms-upgrade points it at a staged,
+# not-yet-installed version to test the patches before installing).
+#
+# Each patch runs on a scratch copy of the tree and is swapped in only if it
+# succeeds, so a patch that dies halfway (dms-launcher-patch applies ~25 steps
+# in order) can never leave half its edits in the running shell.
 #
 # Wired up by ~/.config/systemd/user/dms.service.d/shell-dir.conf.
 set -euo pipefail
 
-SRC=${DMS_SHELL_SRC:-/usr/share/quickshell/dms/quickshell}
 DST=${DMS_SHELL_DIR:-$HOME/.local/share/dms-shell}
+BIN=/usr/bin/dms
+CACHE=$HOME/.cache/dms-shell-src
+FALLBACK=/usr/share/quickshell/dms/quickshell
+
+if [ -n "${DMS_SHELL_SRC:-}" ]; then
+    SRC=$DMS_SHELL_SRC
+else
+    want=$(stat -c '%Y %s' "$BIN" 2>/dev/null || echo none)
+    if [ -f "$CACHE/shell.qml" ] && [ "$(cat "$CACHE/.source-stamp" 2>/dev/null)" = "$want" ]; then
+        SRC=$CACHE
+    elif dux-extract-ui "$BIN" "$CACHE" && printf '%s' "$want" >"$CACHE/.source-stamp"; then
+        echo "dms-shell-sync: extracted stock UI from $BIN"
+        SRC=$CACHE
+    else
+        echo "dms-shell-sync: could not extract the UI from $BIN, using $FALLBACK" >&2
+        SRC=$FALLBACK
+    fi
+fi
 
 [ -f "$SRC/shell.qml" ] || { echo "no DMS reference tree at $SRC" >&2; exit 1; }
 
 mkdir -p "$DST"
 # --delete so a file dropped upstream (or a patch leftover) doesn't linger.
-# $SRC holds debris from before 2026-09-20, when patches were applied to
-# /usr/share directly: .bak-* files and the DMS 1.x Modals/DankLauncherV2
-# folder (not package files). Skip them, and --delete-excluded drops them from
-# $DST too -- otherwise every start left another full set of backups behind
-# (1,800 files by 2026-11-05).
-rsync -a --delete --delete-excluded --exclude '*.bak-*' --exclude '/Modals/DankLauncherV2/' "$SRC/" "$DST/"
+# The /usr/share fallback holds debris from before 2026-09-20, when patches
+# were applied there directly: .bak-* files and the DMS 1.x
+# Modals/DankLauncherV2 folder. Skip them; --delete-excluded also drops them
+# (and the .bak-* files patches leave) from $DST.
+rsync -a --delete --delete-excluded --exclude '*.bak-*' --exclude '/Modals/DankLauncherV2/' \
+    --exclude '/.source-stamp' "$SRC/" "$DST/"
+
+TRY="$DST.try"
+trap 'rm -rf -- "$TRY" "$DST.old"' EXIT
 
 # Patch scripts exit 10 when already applied, which cannot happen on a freshly
 # mirrored tree -- treat anything but 0 as a real failure. A failed patch is
@@ -38,9 +66,14 @@ for patch in dms-tray-patch dms-launcher-patch dms-procs-patch dms-workspace-ded
         echo "dms-shell-sync: $patch not found, skipping" >&2
         continue
     fi
-    if DMS_SHELL_SYNC=1 "$patch" "$DST"; then
+    rm -rf -- "$TRY"
+    cp -a "$DST" "$TRY"
+    rc=0
+    DMS_SHELL_SYNC=1 "$patch" "$TRY" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        mv -- "$DST" "$DST.old" && mv -- "$TRY" "$DST" && rm -rf -- "$DST.old"
         echo "dms-shell-sync: applied $patch"
     else
-        echo "dms-shell-sync: $patch FAILED (exit $?) -- running unpatched" >&2
+        echo "dms-shell-sync: $patch FAILED (exit $rc) -- running without it" >&2
     fi
 done

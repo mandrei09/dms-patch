@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Upgrade the held Dux packages after testing the local patches against them.
+#
+# The Dux stack is on `apt-mark hold` (2026-11-08) so a plain `apt upgrade`
+# can't swap it out from under the local patches. This:
+#   1. finds held packages with a newer candidate version;
+#   2. downloads those debs (no root) into ~/.cache/dms-upgrade/<id>/ and
+#      unpacks them to staged/;
+#   3. extracts the embedded UIs from the STAGED binaries (dux-extract-ui) and
+#      dry-runs every local patch against them: the 7 DMS shell patches via
+#      dms-shell-sync (DMS_SHELL_SRC), the greeter auth patch directly;
+#   4. prints that report, then installs exactly those debs with one pkexec
+#      (~/Documents/dms-upgrade-root.sh unholds, installs, re-holds; apt's
+#      Post-Invoke hook rebuilds the patched greeter UI);
+#   5. restarts DMS (which re-applies the patches for real) and reports what
+#      actually came up.
+# Failing patches do not block the install -- that feature just runs stock
+# until the patch is ported; the staged trees stay in the cache dir for that.
+#
+# Usage: dms-upgrade [--check] [--no-restart] [--recheck] [--test-current]
+#   --check         stop after the report (used by dms-update-check)
+#   --no-restart    install but don't restart DMS
+#   --recheck       ignore a cached report for the same versions
+#   --test-current  treat the INSTALLED versions as the update (dry-run test
+#                   of this script; implies --check)
+# Report: ~/.cache/dms-upgrade/<id>/report.txt, summary line in .../summary
+set -uo pipefail
+
+PKGS=(dms dms-greeter quickshell danksearch dgop)
+CACHE=$HOME/.cache/dms-upgrade
+ROOT_HELPER=$HOME/Documents/dms-upgrade-root.sh
+GREETER_PATCH=/usr/local/lib/dms-greeter-auth/dms-greeter-auth-patch
+
+CHECK=0 RESTART=1 RECHECK=0 TESTCUR=0
+for a in "$@"; do
+    case "$a" in
+        --check) CHECK=1 ;;
+        --no-restart) RESTART=0 ;;
+        --recheck) RECHECK=1 ;;
+        --test-current) TESTCUR=1; CHECK=1 ;;
+        -h|--help) sed -n '2,/^set -uo/p' "$0" | sed '$d;s/^# \{0,1\}//'; exit 0 ;;
+        *) echo "dms-upgrade: unknown option $a" >&2; exit 2 ;;
+    esac
+done
+
+# ── 1. what would change ────────────────────────────────────────────────
+updates=()   # "pkg=version"
+lines=()
+for p in "${PKGS[@]}"; do
+    inst=$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null) || continue
+    cand=$(apt-cache policy "$p" 2>/dev/null | awk '/Candidate:/{print $2; exit}')
+    if [ "$TESTCUR" = 1 ]; then
+        updates+=("$p=$inst"); lines+=("$p $inst (installed, test run)")
+    elif [ -n "$cand" ] && [ "$cand" != "(none)" ] && dpkg --compare-versions "$cand" gt "$inst"; then
+        updates+=("$p=$cand"); lines+=("$p $inst -> $cand")
+    fi
+done
+if [ ${#updates[@]} -eq 0 ]; then
+    echo "Dux packages are up to date."
+    exit 0
+fi
+
+id=$(printf '%s\n' "${updates[@]}" | sha1sum | cut -c1-12)
+DIR=$CACHE/$id
+mkdir -p "$DIR"
+# Only the current candidate set is worth keeping (~330 MB per set).
+find "$CACHE" -mindepth 1 -maxdepth 1 -type d ! -name "$id" -exec rm -rf -- {} +
+printf '%s\n' "${updates[@]}" >"$DIR/versions"
+ln -sfn "$id" "$CACHE/latest"
+
+echo "Dux update:"; printf '  %s\n' "${lines[@]}"
+
+# ── 2-3. download, stage, dry-run the patches ───────────────────────────
+if [ "$RECHECK" = 1 ] || [ ! -f "$DIR/summary" ]; then
+    rm -rf -- "$DIR/debs" "$DIR/staged" "$DIR/shell-src" "$DIR/greeter-src" "$DIR/try"
+    mkdir -p "$DIR/debs" "$DIR/staged"
+    echo "Downloading..."
+    if ! (cd "$DIR/debs" && apt-get download -q "${updates[@]}" >"$DIR/download.log" 2>&1); then
+        echo "dms-upgrade: download failed, see $DIR/download.log" >&2
+        tail -3 "$DIR/download.log" >&2
+        exit 1
+    fi
+    for deb in "$DIR"/debs/*.deb; do dpkg-deb -x "$deb" "$DIR/staged"; done
+
+    # Staged binary when that package is part of the update, installed otherwise.
+    pick() { [ -x "$DIR/staged$1" ] && echo "$DIR/staged$1" || echo "$1"; }
+    results=()   # "name PASS|FAIL detail"
+
+    if dux-extract-ui "$(pick /usr/bin/dms)" "$DIR/shell-src" 2>"$DIR/extract-dms.log"; then
+        out=$(DMS_SHELL_SRC="$DIR/shell-src" DMS_SHELL_DIR="$DIR/try/shell" DMS_SHELL_SYNC=1 \
+            dms-shell-sync 2>&1)
+        printf '%s\n' "$out" >"$DIR/dms-patches.log"
+        while IFS= read -r l; do
+            case "$l" in
+                "dms-shell-sync: applied "*) results+=("${l#dms-shell-sync: applied } PASS") ;;
+                *" FAILED "*) n=${l#dms-shell-sync: }; results+=("${n%% FAILED*} FAIL") ;;
+                *"not found, skipping"*) n=${l#dms-shell-sync: }; results+=("${n%% not found*} FAIL (script missing)") ;;
+            esac
+        done <<<"$out"
+    else
+        results+=("dms-shell (all 7 patches) FAIL (could not extract the UI, see extract-dms.log)")
+    fi
+
+    if [ ! -r "$GREETER_PATCH" ]; then
+        results+=("dms-greeter-auth-patch FAIL (not installed at $GREETER_PATCH)")
+    elif dux-extract-ui "$(pick /usr/bin/dms-greeter)" "$DIR/greeter-src" 2>"$DIR/extract-greeter.log"; then
+        rm -rf -- "$DIR/try/greeter"; mkdir -p "$DIR/try"
+        cp -a "$DIR/greeter-src" "$DIR/try/greeter"
+        if python3 -I "$GREETER_PATCH" "$DIR/try/greeter" >"$DIR/greeter-patch.log" 2>&1; then
+            results+=("dms-greeter-auth-patch PASS")
+        else
+            results+=("dms-greeter-auth-patch FAIL ($(tail -1 "$DIR/greeter-patch.log" | sed 's/^dms-greeter-auth-patch: //'))")
+        fi
+    else
+        results+=("dms-greeter-auth-patch FAIL (could not extract the greeter UI, see extract-greeter.log)")
+    fi
+
+    total=${#results[@]}
+    pass=$(printf '%s\n' "${results[@]}" | grep -c ' PASS$')
+    failing=$(printf '%s\n' "${results[@]}" | grep -v ' PASS$' | awk '{print $1}' | paste -sd, | sed 's/,/, /g')
+    ver=$(printf '%s\n' "${updates[@]}" | grep '^dms=' | cut -d= -f2)
+    [ -n "$ver" ] || ver=$(printf '%s ' "${updates[@]}")
+    summary="Dux ${ver% } available: $pass/$total patches pass"
+    [ -n "$failing" ] && summary+=" ($failing would run stock)"
+    {
+        echo "dms-upgrade report $(date '+%F %T')"
+        printf '  %s\n' "${lines[@]}"
+        echo
+        printf '%s\n' "${results[@]}" | awk '{s=$2; n=$1; $1=$2=""; printf "  %-30s %s%s\n", n, s, $0}'
+        if printf '%s\n' "${updates[@]}" | grep -q '^quickshell='; then
+            echo
+            echo "  quickshell changes the QML runtime itself; no patch test covers that --"
+            echo "  check 'journalctl --user -u dms' for QML errors after the restart."
+        fi
+        echo
+        echo "Staged trees (to port failing patches): $DIR/shell-src  $DIR/greeter-src"
+    } >"$DIR/report.txt"
+    printf '%s\n' "$summary" >"$DIR/summary"
+    rm -rf -- "$DIR/try"
+fi
+
+echo
+cat "$DIR/report.txt"
+[ "$CHECK" = 1 ] && exit 0
+
+# ── 4. install ──────────────────────────────────────────────────────────
+debs=("$DIR"/debs/*.deb)
+[ -e "${debs[0]}" ] || { echo "dms-upgrade: no staged debs, rerun with --recheck" >&2; exit 1; }
+echo
+echo "Installing (one password prompt)..."
+if ! pkexec "$ROOT_HELPER" "${debs[@]}"; then
+    echo "dms-upgrade: install failed, see ~/Documents/dms-upgrade-root.log" >&2
+    exit 1
+fi
+tail -n 4 "$HOME/Documents/dms-upgrade-root.log"
+# Installed now; the debs and unpacked packages are dead weight. The extracted
+# UI trees stay (small) in case a failing patch still needs porting.
+rm -rf -- "$DIR/debs" "$DIR/staged"
+
+# ── 5. restart and report what really came up ───────────────────────────
+if [ "$RESTART" = 1 ]; then
+    echo
+    echo "Restarting DMS..."
+    systemctl --user restart dms.service
+    sleep 3
+    systemctl --user is-active --quiet dms.service && echo "DMS is running." || echo "DMS is NOT running: journalctl --user -u dms.service" >&2
+    journalctl --user -u dms.service --since "-30s" --no-pager -o cat | grep '^dms-shell-sync:' | sed 's/^/  /'
+fi
+want="$(dpkg-query -W -f='${Version}' dms) $(dpkg-query -W -f='${Version}' dms-greeter)"
+if [ "$(cat /usr/local/share/dms-greeter-shell/.built-for 2>/dev/null)" = "$want" ]; then
+    echo "  greeter: patched UI built for $want"
+else
+    echo "  greeter: running the STOCK login screen (patch failed or not rebuilt)"
+fi
+rm -f "$HOME/.cache/dms-update-guard/last-notified"

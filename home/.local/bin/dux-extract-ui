@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Extract the QML UI embedded in a Dux binary (dms, dms-greeter) to a directory.
+#
+# Since DMS 2.x the UI lives inside the binary; /usr/share/quickshell/dms is a
+# reference copy that already lost the greeter in 2.1.1 and is not shipped by
+# the -git packages at all. `<bin> run` unpacks the UI to
+# $XDG_RUNTIME_DIR/<name>-shell/<rev> and then execs `qs`. With an empty
+# environment, a throwaway HOME/XDG_RUNTIME_DIR and PATH pointing nowhere it
+# extracts, fails to find qs and exits -- no UI starts, nothing is written
+# outside the temp dir (verified 2026-11-08 for dms and dms-greeter 2.1.1).
+#
+# The temp dir must have a short path: the backend binds a unix socket in it
+# (108-byte limit), which is why it goes under $XDG_RUNTIME_DIR.
+#
+# Usage: dux-extract-ui BINARY OUTDIR     (OUTDIR is replaced; exit 1 on failure)
+set -euo pipefail
+
+[ $# -eq 2 ] || { echo "usage: dux-extract-ui BINARY OUTDIR" >&2; exit 2; }
+bin=$1 out=$2
+[ -x "$bin" ] || { echo "dux-extract-ui: not executable: $bin" >&2; exit 1; }
+
+base=${XDG_RUNTIME_DIR:-}
+[ -n "$base" ] && [ -d "$base" ] && [ -w "$base" ] || base=/tmp
+work=$(mktemp -d -p "$base" dxui.XXXXXX)
+# The extracted files are read-only; make them deletable first.
+trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf -- "$work"' EXIT
+mkdir -m 700 "$work/r" "$work/h"
+
+timeout 60 env -i HOME="$work/h" XDG_RUNTIME_DIR="$work/r" PATH=/nonexistent \
+    "$bin" run >"$work/log" 2>&1 || true
+
+src=$(find "$work/r" -mindepth 3 -maxdepth 3 -name shell.qml -path '*-shell/*' \
+    -not -path '*/.extract-*' 2>/dev/null | head -1)
+if [ -z "$src" ]; then
+    echo "dux-extract-ui: no UI extracted from $bin:" >&2
+    tail -3 "$work/log" >&2
+    exit 1
+fi
+src=${src%/shell.qml}
+
+mkdir -p "$out"
+rsync -a --delete "$src/" "$out/"
+chmod -R u+w "$out"

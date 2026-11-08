@@ -9,7 +9,8 @@
 # Run by:
 #   - dms.service ExecStartPost (drop-in guard.conf), after every DMS start;
 #   - dms-update-guard.path, whenever /var/lib/dpkg/status changes (any apt
-#     install / upgrade / autoremove).
+#     install / upgrade / autoremove);
+#   - dms-update-guard.timer, daily -- picks up new Dux versions on the PPA.
 #
 # Usage: dms-update-check [--notify]   (exit 1 when something needs attention)
 # Report: ~/.cache/dms-update-guard/report.txt
@@ -26,6 +27,32 @@ mkdir -p "$OUT_DIR"
 problems=()
 add() { problems+=("$*"); }
 
+# ── 0. a held Dux update is waiting ─────────────────────────────────────
+# The Dux stack is on apt-mark hold (2026-11-08); dms-upgrade tests the local
+# patches against a new version before installing it. --check downloads and
+# tests once per candidate set (cached), so this is cheap after the first run.
+if command -v dms-upgrade >/dev/null 2>&1; then
+    if ! dms-upgrade --check >"$OUT_DIR/dms-upgrade-check.log" 2>&1; then
+        add "dms-upgrade --check failed: $(tail -1 "$OUT_DIR/dms-upgrade-check.log")"
+    elif ! grep -q '^Dux packages are up to date' "$OUT_DIR/dms-upgrade-check.log"; then
+        sum=$(cat "$HOME_DIR/.cache/dms-upgrade/latest/summary" 2>/dev/null)
+        add "${sum:-Dux update available}. Install with: dms-upgrade"
+    fi
+fi
+held=$(apt-mark showhold 2>/dev/null)
+for p in dms dms-greeter quickshell danksearch dgop; do
+    dpkg-query -W "$p" >/dev/null 2>&1 || continue
+    printf '%s\n' "$held" | grep -qx "$p" \
+        || add "$p is not on hold, so apt upgrade can update it untested (fix: pkexec apt-mark hold $p)"
+done
+
+# ── 0b. patched login screen matches the installed versions ─────────────
+want="$(dpkg-query -W -f='${Version}' dms 2>/dev/null) $(dpkg-query -W -f='${Version}' dms-greeter 2>/dev/null)"
+if [ -x /usr/local/bin/dms-greeter-launch ] \
+   && [ "$(cat /usr/local/share/dms-greeter-shell/.built-for 2>/dev/null)" != "$want" ]; then
+    add "login screen runs the STOCK greeter: dms-greeter-auth-patch not built for $want (journalctl -t dms-greeter-ui-rebuild)"
+fi
+
 # ── 1. local DMS patches applied on the last DMS start ──────────────────
 # dms-shell-sync logs one "applied X" or "X FAILED" line per patch.
 since=$(systemctl --user show dms.service -p ActiveEnterTimestamp --value)
@@ -40,10 +67,11 @@ fi
 # ── 1b. dry-run the patches against the INSTALLED DMS ───────────────────
 # apt doesn't restart DMS, so after an update the running shell still has the
 # old patched tree and section 1 can't see a break until the next login. Build
-# a throwaway tree from the new /usr/share copy and apply every patch to it.
-SRC=/usr/share/quickshell/dms/quickshell
+# a throwaway tree from the installed binary (dms-shell-sync extracts it) and
+# apply every patch to it. Mostly a safety net now that dms-upgrade tests
+# before installing; it still catches a manual `apt install dms`.
 DRY="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/dms-update-guard/shell"
-if [ -f "$SRC/shell.qml" ] && command -v dms-shell-sync >/dev/null 2>&1; then
+if [ -x /usr/bin/dms ] && command -v dms-shell-sync >/dev/null 2>&1; then
     rm -rf -- "${DRY:?}"
     mkdir -p "$DRY"
     dry=$(DMS_SHELL_DIR="$DRY" DMS_SHELL_SYNC=1 dms-shell-sync 2>&1)
@@ -105,7 +133,7 @@ REQUIRED_PKGS=(grim slurp wl-clipboard tesseract-ocr tesseract-ocr-eng tesseract
     libnotify-bin file-roller fd-find tmux zenity playerctl brightnessctl cliphist
     pipewire-bin wireplumber openssh-client danksearch)
 for p in "${REQUIRED_PKGS[@]}"; do
-    if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
+    if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -qE '^(install|hold) ok installed'; then
         add "package missing: $p (reinstall: pkexec apt-get install $p)"
     elif apt-mark showauto "$p" 2>/dev/null | grep -qx "$p"; then
         add "package only auto-installed, autoremove may take it: $p (fix: pkexec apt-mark manual $p)"
