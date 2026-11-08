@@ -254,6 +254,8 @@ else:
             focusReturnTarget: searchInput
             keyForwardTargets: [searchKeyHandler]
             readonly property real bottomInset: Theme.spacingS
+            availableHeight: Math.max(0, root._maxResultsH - root._resultsTopGap - bottomInset)
+            resizing: actionPanel.animating
             anchors.fill: parent
             anchors.topMargin: root._resultsTopGap
 """
@@ -275,6 +277,8 @@ else:
             focusReturnTarget: searchInput
             keyForwardTargets: [searchKeyHandler]
             readonly property real bottomInset: Theme.spacingS
+            availableHeight: Math.max(0, root._maxResultsH - root._resultsTopGap - bottomInset)
+            resizing: actionPanel.animating
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             anchors.left: parent.left
@@ -469,9 +473,10 @@ t3 = open(content).read()
 if "selectedItem ? 420" in t3 or "data?.details?.length" in t3:
     print("SpotlightLauncherContent.qml: details height floor already patched")
 else:
-    old = "    readonly property real _resultsH: _hasQuery ? Math.min(_resultsContentH, _maxResultsH) : 0"
+    # 2.1: the height is capped by the list's fittedHeight instead of _maxResultsH.
+    old = "    readonly property real _resultsH: _hasQuery ? Math.min(_resultsContentH, _resultsTopGap + resultsList.fittedHeight + resultsList.bottomInset) : 0"
     assert t3.count(old) == 1, "SpotlightLauncherContent.qml: _resultsH anchor not found/unique"
-    t3 = t3.replace(old, "    readonly property real _resultsH: _hasQuery ? Math.min(Math.max(_resultsContentH, root.controller?.selectedItem ? 420 : 0), _maxResultsH) : 0")
+    t3 = t3.replace(old, "    readonly property real _resultsH: _hasQuery ? Math.min(Math.max(Math.min(_resultsContentH, _resultsTopGap + resultsList.fittedHeight + resultsList.bottomInset), root.controller?.selectedItem ? 420 : 0), _maxResultsH) : 0")
     backup(content); open(content, "w").write(t3)
     print("SpotlightLauncherContent.qml: patched (details height floor)")
     changed = True
@@ -1129,13 +1134,14 @@ else:
 """
     a_row = """                                        DIcon {
                                             name: menuItemDelegate.modelData?.icon ?? ""
-                                            size: Theme.iconSizeMedium
-                                            color: menuRow.contentColor
+                                            size: root.itemIconSize
+                                            color: menuRow.iconColor
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
 """
-    a_textw = "width: parent.width - (Theme.iconSizeMedium + Theme.spacingS) * (trailingIcon.visible ? 2 : 1)"
-    a_width = "menuTextMetrics.width + Theme.iconSize + Theme.spacingS * 5"
+    # 2.1 restyle: sizes come from root.itemIconSize / itemSpacing / itemPadding.
+    a_textw = "width: parent.width - (root.itemIconSize + root.itemSpacing) * (trailingIcon.visible ? 2 : 1)"
+    a_width = "itemSpacing + (hasTrailingIcons ? itemIconSize + itemSpacing : 0)"
     for nm, a in (("keyboardNavigable prop", a_prop), ("key hook", a_keys), ("row icon", a_row), ("text width", a_textw), ("menu width", a_width)):
         assert d.count(a) == 1, f"patch 21: DContextMenu {nm} anchor not found/unique"
     d = d.replace(a_prop, a_prop + """    // patch 21: show 1-9, 0, a-z on entries; pressing one activates it.
@@ -1186,12 +1192,12 @@ else:
                                         textColor: menuRow.selected ? menuRow.contentColor : Theme.onSurfaceVariant
                                         opacity: menuRow.itemEnabled ? 1 : 0.5
                                         anchors.right: parent.right
-                                        anchors.rightMargin: Theme.spacingS + (trailingIcon.visible ? Theme.iconSizeMedium + Theme.spacingS : 0)
+                                        anchors.rightMargin: root.itemPadding + (trailingIcon.visible ? root.itemIconSize + root.itemSpacing : 0)
                                         anchors.verticalCenter: parent.verticalCenter
                                     }
 
 """ + a_trail)
-    d = d.replace(a_textw, "width: parent.width - (Theme.iconSizeMedium + Theme.spacingS) * (trailingIcon.visible ? 2 : 1) - (root.numberedKeys ? root._keyColW + Theme.spacingS : 0)")
+    d = d.replace(a_textw, a_textw + " - (root.numberedKeys ? root._keyColW + root.itemSpacing : 0)")
     d = d.replace(a_width, a_width + " + (numberedKeys ? _keyColW + Theme.spacingL * 2 : 0)")
     backup(dcm21); open(dcm21, "w").write(d)
     print("DContextMenu.qml:             patched (numbered keys)")
@@ -1507,8 +1513,8 @@ if "appIconValue" in d:
 else:
     a_icon = """                                        DIcon {
                                             name: menuItemDelegate.modelData?.icon ?? ""
-                                            size: Theme.iconSizeMedium
-                                            color: menuRow.contentColor
+                                            size: root.itemIconSize
+                                            color: menuRow.iconColor
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
 """
@@ -1516,16 +1522,16 @@ else:
     d = d.replace(a_icon, """                                        DIcon {
                                             visible: !menuItemDelegate.modelData?.appIconValue // patch 25
                                             name: menuItemDelegate.modelData?.icon ?? ""
-                                            size: Theme.iconSizeMedium
-                                            color: menuRow.contentColor
+                                            size: root.itemIconSize
+                                            color: menuRow.iconColor
                                             anchors.verticalCenter: parent.verticalCenter
                                         }
 
                                         AppIconRenderer {
                                             visible: !!menuItemDelegate.modelData?.appIconValue
-                                            width: Theme.iconSizeMedium
-                                            height: Theme.iconSizeMedium
-                                            iconSize: Theme.iconSizeMedium
+                                            width: root.itemIconSize
+                                            height: root.itemIconSize
+                                            iconSize: root.itemIconSize
                                             iconValue: menuItemDelegate.modelData?.appIconValue ?? ""
                                             fallbackText: ""
                                             anchors.verticalCenter: parent.verticalCenter

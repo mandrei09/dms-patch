@@ -29,14 +29,15 @@ TARGET = os.path.join(SHELL_DIR, "Services/DgopService.qml")
 MARKER = "dms-procs-patch"
 
 # DMS 2.0 added its own full-list mode, but only while the search box has
-# text (fullProcessListRefs); sorting by Memory still saw the top 100 by CPU.
-OLD = '''            params.limit = fullProcessListRefs > 0 ? 0 : 100;
-            params.sort = "cpu";'''
+# text (fullProcessListRefs). DMS 2.1 sorts on the dgop side (dgopSort()), so
+# Memory/CPU/PID descending are right even when limited -- but name, nice and
+# any ascending sort still only see an arbitrary 100. Keep upstream's sort and
+# drop the limit.
+OLD = '''            params.limit = fullProcessListRefs > 0 ? 0 : 100;'''
 
 NEW = '''            // Local patch (~/.local/bin/dms-procs-patch): fetch every process so
-            // Memory sorting and search are not limited to the top 100 by CPU.
-            params.limit = 0;
-            params.sort = currentSort === "memory" ? "memory" : "cpu";'''
+            // every sort order and search see the whole list, not 100 rows.
+            params.limit = 0;'''
 
 
 def main():

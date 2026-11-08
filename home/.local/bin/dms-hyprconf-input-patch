@@ -132,6 +132,12 @@ EDITS = {
     function hyprScrollMethod(method) {'''),
     ],
     "Modules/Settings/Widgets/ConfigInclude.qml": [
+        # 2.1: readOnly is a property (drives IncludeSetupBanner's legacy
+        # warning and disables its button) -- input is not read-only here.
+        ('''    readonly property bool readOnly: CompositorService.isHyprland && !HyprlandService.luaConfigActive
+''',
+         '''    readonly property bool readOnly: CompositorService.isHyprland && !HyprlandService.luaConfigActive && !hyprConfInput // dms-hyprconf-input-patch
+'''),
         ('''    function check() {
 ''',
          '''    // Local patch (~/.local/bin/dms-hyprconf-input-patch): in hyprland.conf mode
@@ -154,7 +160,7 @@ EDITS = {
             return;
         }
 '''),
-        ('''        if (CompositorService.isHyprland && !HyprlandService.luaConfigActive) {
+        ('''        if (readOnly) {
             showReadOnlyWarning();''',
          '''        if (hyprConfInput) {
             const dmsDir = configDir() + "/hypr/dms";
@@ -167,7 +173,7 @@ EDITS = {
             });
             return;
         }
-        if (CompositorService.isHyprland && !HyprlandService.luaConfigActive) {
+        if (readOnly) {
             showReadOnlyWarning();'''),
     ],
     "Modules/Settings/MouseTouchpadTab.qml": [

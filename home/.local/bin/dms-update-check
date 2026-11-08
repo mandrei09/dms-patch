@@ -64,7 +64,7 @@ fi
 # name something our own files use).
 # Files the local patches touch or install, plus local plugins.
 OWN_FILES_RE='LauncherDetailsPane|LauncherExtraActions|ItemTransformers|DLauncherV2/Controller|LauncherContent|SpotlightLauncherContent|LauncherContextMenu|DContextMenu|DLauncherV2ModalHost|LauncherTab|SessionData|DgopService|CompositorService|LockNotificationsWidget|NotificationService|plugins/'
-for unit in dms snip altswitcher langswitcher; do
+for unit in dms snip altswitcher; do
     st=$(systemctl --user show "$unit.service" -p ActiveEnterTimestamp --value)
     [ -z "$st" ] || [ "$st" = "n/a" ] && continue
     if ! systemctl --user is-active --quiet "$unit.service"; then
@@ -103,7 +103,7 @@ done
 REQUIRED_PKGS=(grim slurp wl-clipboard tesseract-ocr tesseract-ocr-eng tesseract-ocr-ron
     python3-cairo jq rsync poppler-utils libglib2.0-bin libgtk-3-bin file
     libnotify-bin file-roller fd-find tmux zenity playerctl brightnessctl cliphist
-    pipewire-bin wireplumber openssh-client danksearch dux-files)
+    pipewire-bin wireplumber openssh-client danksearch)
 for p in "${REQUIRED_PKGS[@]}"; do
     if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q 'install ok installed'; then
         add "package missing: $p (reinstall: pkexec apt-get install $p)"
@@ -134,16 +134,6 @@ for d in .config .cache .local/state; do
         [ -n "$left" ] && add "~/$d/DankMaterialShell is gone but still referenced in: $(echo $left)"
     fi
 done
-
-# ── 6. Dux Files wrapper ────────────────────────────────────────────────
-if [ -x /usr/bin/dfiles ]; then
-    want=$(stat -c '%Y %s' /usr/bin/dfiles)
-    have=$(cat "$HOME_DIR/.local/share/dfiles-shell/.source-stamp" 2>/dev/null)
-    last=$(tail -1 "$HOME_DIR/.cache/dfiles-wrapper.log" 2>/dev/null)
-    case "$last" in *"sync failed"*|*"no extracted tree"*)
-        [ "$want" != "$have" ] && add "dfiles patched UI not rebuilt for the installed dfiles (it rebuilds on the next start with no dfiles window open; log: ~/.cache/dfiles-wrapper.log)";;
-    esac
-fi
 
 # ── report ──────────────────────────────────────────────────────────────
 {

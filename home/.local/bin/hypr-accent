@@ -27,7 +27,7 @@ fi
 hex=$("$RESOLVE" --print | tr -d '#[:space:]')
 
 # One shared palette (dms-colors.json shape, custom-theme colours applied) for
-# the quickshell overlays (snip, altswitcher, langswitcher), which watch it.
+# the quickshell overlays (snip, altswitcher), which watch it.
 # Written in place, not replaced, so their file watches stay attached.
 printf '%s\n' "$pal" > "$HOME/.cache/accent/palette.json"
 
