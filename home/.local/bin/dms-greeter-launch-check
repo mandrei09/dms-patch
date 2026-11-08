@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# Does /usr/local/bin/dms-greeter-launch still start the login screen the way
+# this dms-greeter binary would?
+#
+# While Hyprland < 0.57 the launcher bypasses dms-greeter's compositor setup
+# (dms-greeter 2.1 writes a Lua config that Hyprland 0.53 can't parse: black
+# login screen, 2026-11-08) and replicates it in hyprlang: the env vars
+# dms-greeter sets plus `qs -p <ui>; hyprctl dispatch exit`. If a new
+# dms-greeter starts the UI differently or needs another env var, the
+# launcher's copy is stale and the login screen may break -- no QML patch test
+# sees that. This runs the binary with a fake start-hyprland on PATH that just
+# records the config and environment it is handed, and compares.
+#
+# Usage: dms-greeter-launch-check [DMS_GREETER_BINARY]   (default /usr/bin/dms-greeter)
+# Exit 0 = launcher matches (or not in use), 1 = mismatch, 2 = could not test.
+set -uo pipefail
+export LC_ALL=C   # comm needs the same collation as sort
+
+bin=${1:-/usr/bin/dms-greeter}
+launcher=${DMS_GREETER_LAUNCHER:-/usr/local/bin/dms-greeter-launch}
+conf=/etc/greetd/dms-hyprland.conf
+
+[ -x "$bin" ] || { echo "cannot test: $bin is not executable"; exit 2; }
+[ -r "$launcher" ] || { echo "launcher missing: $launcher"; exit 1; }
+
+hypr_ver=$(dpkg-query -W -f='${Version}' hyprland 2>/dev/null)
+if [ -n "$hypr_ver" ] && dpkg --compare-versions "$hypr_ver" ge 0.57; then
+    echo "OK: Hyprland $hypr_ver -- the launcher hands off to dms-greeter, nothing replicated"
+    exit 0
+fi
+
+work=$(mktemp -d -p "${XDG_RUNTIME_DIR:-/tmp}" dglc.XXXXXX) || exit 2
+trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf -- "$work"' EXIT
+mkdir -p "$work/shim" "$work/run" "$work/cache" "$work/home"
+chmod 700 "$work/run"
+cat >"$work/shim/start-hyprland" <<EOF
+#!/bin/sh
+prev=
+for a in "\$@"; do
+    if [ "\$prev" = --config ]; then
+        if [ -d "\$a" ]; then cat "\$a"/* ; else cat "\$a"; fi >"$work/config"
+    fi
+    prev=\$a
+done
+env >"$work/env"
+EOF
+chmod +x "$work/shim/start-hyprland"
+cp -p "$work/shim/start-hyprland" "$work/shim/Hyprland"
+
+# Empty environment: everything in the dump was set by dms-greeter itself.
+env -i PATH="$work/shim:/usr/bin:/bin" HOME="$work/home" XDG_RUNTIME_DIR="$work/run" \
+    USER="${USER:-$(id -un)}" timeout 60 "$bin" --command hyprland --debug \
+    --cache-dir "$work/cache" -C "$conf" >"$work/out" 2>&1
+if [ ! -s "$work/config" ]; then
+    echo "cannot test: $bin did not start the compositor ($(tail -1 "$work/out" | cut -c1-200))"
+    exit 2
+fi
+
+fails=()
+
+# 1. how the UI is started
+qs=$(grep -oE "qs -p [^;\"']+" "$work/config" | head -1 | sed "s#$work/cache/[^ ]*#<ui>#;s/ *\$//")
+if [ "$qs" != "qs -p <ui>" ]; then
+    line=$(grep -E 'qs|exec' "$work/config" | sed "s#$work/cache/[^ ;\"']*#<ui>#g" | tr -s ' \t' ' ' | head -2 | paste -sd' ')
+    fails+=("UI is no longer started as 'qs -p <ui>': ${line:-no exec line found}")
+fi
+
+# 2. env vars dms-greeter sets (process env + env lines in the config)
+names() { grep -oE '^(DMS|QT|QS|XDG_SESSION|XDG_CURRENT|WLR|AQ|HYPRLAND)[A-Z0-9_]*=' | tr -d = ; }
+theirs=$( { names <"$work/env"
+            grep -oE 'hl\.env\("[A-Z0-9_]+"' "$work/config" | grep -oE '[A-Z0-9_]+"' | tr -d '"'
+            grep -oE '^env *= *[A-Z0-9_]+' "$work/config" | grep -oE '[A-Z0-9_]+$'
+          } | sort -u)
+ours=$( { sed -n '/^ *export /,/[^\\]$/p' "$launcher" | grep -oE '[A-Z0-9_]+=' | tr -d =
+          grep -oE '^env *= *[A-Z0-9_]+' "$conf" | grep -oE '[A-Z0-9_]+$'
+        } | sort -u)
+missing=$(comm -23 <(printf '%s\n' "$theirs") <(printf '%s\n' "$ours") | grep -v '^$' | paste -sd' ')
+[ -n "$missing" ] && fails+=("dms-greeter now also sets: $missing (add to the launcher's export line)")
+
+if [ ${#fails[@]} -eq 0 ]; then
+    echo "OK: launcher matches $bin (qs -p <ui>; env: $(printf '%s' "$theirs" | paste -sd' '))"
+    exit 0
+fi
+printf 'FAIL: %s\n' "${fails[@]}"
+exit 1

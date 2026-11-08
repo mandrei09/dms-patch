@@ -53,6 +53,27 @@ if [ -x /usr/local/bin/dms-greeter-launch ] \
     add "login screen runs the STOCK greeter: dms-greeter-auth-patch not built for $want (journalctl -t dms-greeter-ui-rebuild)"
 fi
 
+# ── 0c. login screen's compositor launcher ──────────────────────────────
+# /usr/local/bin/dms-greeter-launch starts the greeter's Hyprland itself while
+# Hyprland < 0.57 (dms-greeter 2.1 writes Lua configs 0.53 can't read: black
+# login screen, 2026-11-08). The installed copy must match the dotfiles copy,
+# and must still match how the installed dms-greeter starts its UI. The second
+# test runs the binary, so it is cached per (binary, launcher, Hyprland) state.
+LAUNCHER=/usr/local/bin/dms-greeter-launch
+LAUNCHER_SRC="$HOME_DIR/dotfiles/.system/usr/local/bin/dms-greeter-launch"
+if [ -f "$LAUNCHER_SRC" ] && ! cmp -s "$LAUNCHER_SRC" "$LAUNCHER"; then
+    add "dms-greeter-launch differs from the dotfiles copy (install: sudo install -m755 $LAUNCHER_SRC /usr/local/bin/)"
+fi
+if [ -x /usr/bin/dms-greeter ] && command -v dms-greeter-launch-check >/dev/null 2>&1; then
+    key=$(stat -c '%n %Y %s' /usr/bin/dms-greeter "$LAUNCHER" 2>/dev/null; dpkg-query -W -f='${Version}' hyprland 2>/dev/null)
+    if [ "$(cat "$OUT_DIR/greeter-launch.key" 2>/dev/null)" != "$key" ]; then
+        dms-greeter-launch-check >"$OUT_DIR/greeter-launch.txt" 2>&1
+        printf '%s\n' "$key" >"$OUT_DIR/greeter-launch.key"
+    fi
+    grep -q '^OK' "$OUT_DIR/greeter-launch.txt" 2>/dev/null \
+        || add "login screen launcher out of date: $(head -1 "$OUT_DIR/greeter-launch.txt")"
+fi
+
 # ── 1. local DMS patches applied on the last DMS start ──────────────────
 # dms-shell-sync logs one "applied X" or "X FAILED" line per patch.
 since=$(systemctl --user show dms.service -p ActiveEnterTimestamp --value)

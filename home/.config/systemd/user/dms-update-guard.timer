@@ -1,7 +1,7 @@
 # Daily: the Dux packages are on hold, so nothing changes in dpkg when a new
 # version lands on the PPA. This runs dms-update-check, which asks
 # dms-upgrade --check to download + test the patches against it once and
-# notifies "Dux X available: N/8 patches pass. Install with: dms-upgrade".
+# notifies "Dux X available: N/9 checks pass. Install with: dms-upgrade".
 [Unit]
 Description=Daily check for held Dux updates and local DMS customisations
 

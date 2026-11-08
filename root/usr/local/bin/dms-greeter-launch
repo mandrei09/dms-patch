@@ -1,0 +1,103 @@
+#!/bin/sh
+# greetd's default_session command (see /etc/greetd/config.toml); runs as the
+# `greeter` user. Source: ~/dotfiles/.system/usr/local/bin/dms-greeter-launch
+# (install: sudo install -m755 <that file> /usr/local/bin/).
+#
+# 1. Login screen only on the external display when one is connected (same
+#    rule as the desktop's hypr-monitor-watch): the -C compositor config is
+#    copied with `monitor = eDP-1,disable` appended, decided from
+#    /sys/class/drm BEFORE the compositor starts, so the UI never sees a
+#    screen vanish. greeter-monitor-watch handles hotplug afterwards.
+# 2. Patched UI (/usr/local/share/dms-greeter-shell) only while it was built
+#    for the installed dms + dms-greeter versions; otherwise the stock
+#    embedded UI, so a DMS update can never strand the login screen.
+# 3. Hyprland < 0.57: start the compositor HERE, not through dms-greeter.
+#    dms-greeter 2.1 always writes a Lua compositor config ("Hyprland 0.57
+#    only reads Lua config; ignoring -C ...") that Hyprland 0.53 cannot parse,
+#    so the login UI was never exec'd: black screen on every boot
+#    (2026-11-08). We replicate exactly what dms-greeter 2.1.1 does -- same
+#    env, `qs -p <ui>; hyprctl dispatch exit` -- in hyprlang. Hyprland >= 0.57
+#    goes back through dms-greeter as upstream intends.
+UI=/usr/local/share/dms-greeter-shell
+BIN=/usr/bin/dms-greeter
+CACHE=/var/cache/dms-greeter
+
+external=0
+for s in /sys/class/drm/card*-*/status; do
+    [ -r "$s" ] || continue
+    c=${s%/status}; c=${c##*/}; c=${c#card*-}
+    case "$c" in eDP-*|LVDS-*|DSI-*|Writeback-*) continue ;; esac
+    [ "$(cat "$s" 2>/dev/null)" = connected ] && external=1
+done
+
+# 3. No crash reports from the greeter. Its Hyprland segfaults on EVERY exit
+#    (aquamarine CLogger::log on a destroyed backend during teardown,
+#    upstream hyprwm/aquamarine#272, unfixed as of 2026-11), and apport spent
+#    ~1 s on each one before discarding it ("already exists") -- a second of
+#    black screen on every login. RLIMIT_CORE of exactly 1 BYTE makes the
+#    kernel abort the core ("RLIMIT_CORE is set to 1, aborting core") without
+#    calling apport, so the crash costs nothing. Not `ulimit -c 1`: in sh that
+#    is one 512-byte block, and apport still runs (tested 2026-11-07).
+prlimit --pid $$ --core=1 2>/dev/null
+
+want="$(dpkg-query -W -f='${Version}' dms 2>/dev/null) $(dpkg-query -W -f='${Version}' dms-greeter 2>/dev/null)"
+patched=0
+[ -f "$UI/shell.qml" ] && [ "$(cat "$UI/.built-for" 2>/dev/null)" = "$want" ] && patched=1
+
+gen_dir=${XDG_RUNTIME_DIR:-}
+[ -n "$gen_dir" ] && [ -d "$gen_dir" ] && [ -w "$gen_dir" ] || gen_dir=$(mktemp -d)
+
+hypr_ver=$(dpkg-query -W -f='${Version}' hyprland 2>/dev/null)
+if [ -n "$hypr_ver" ] && dpkg --compare-versions "$hypr_ver" lt 0.57; then
+    # ── own hyprlang path ───────────────────────────────────────────────
+    conf=/etc/greetd/dms-hyprland.conf
+    prev=""
+    for a in "$@"; do
+        { [ "$prev" = "-C" ] || [ "$prev" = "--config" ]; } && conf=$a
+        { [ "$prev" = "--cache-dir" ]; } && CACHE=$a
+        prev=$a
+    done
+
+    if [ "$patched" = 1 ]; then
+        ui=$UI
+    else
+        # Stock UI: unpack the tree embedded in the binary (see
+        # /usr/local/sbin/dms-greeter-ui-rebuild for the trick).
+        ex="$gen_dir/stock-ui"
+        chmod -R u+w "$ex" 2>/dev/null; rm -rf -- "$ex"
+        mkdir -p -m 700 "$ex/run" "$ex/home"
+        timeout 30 env -i HOME="$ex/home" XDG_RUNTIME_DIR="$ex/run" PATH=/nonexistent \
+            "$BIN" run >/dev/null 2>&1
+        ui=$(find "$ex/run/dms-greeter-shell" -mindepth 2 -maxdepth 2 -name shell.qml \
+                -not -path '*/.extract-*' 2>/dev/null | head -1)
+        ui=${ui%/shell.qml}
+        [ -n "$ui" ] || ui=$UI   # last resort: whatever tree is installed
+        logger -t dms-greeter-launch "patched UI missing or stale (want: $want); using the stock UI ($ui)"
+    fi
+
+    gen="$gen_dir/dms-greeter-hyprland.conf"
+    {
+        cat "$conf"
+        printf '\n# --- added by dms-greeter-launch ---\n'
+        [ "$external" = 1 ] && echo 'monitor = eDP-1,disable'
+        echo 'exec-once = /usr/local/libexec/greeter-monitor-watch'
+        echo "exec-once = sh -c \"qs -p '$ui'; hyprctl dispatch exit\""
+    } > "$gen.tmp" && mv -f "$gen.tmp" "$gen"
+    logger -t dms-greeter-launch "external display: $([ $external = 1 ] && echo yes, laptop panel off || echo no); Hyprland $hypr_ver, hyprlang config"
+
+    export XDG_SESSION_TYPE=wayland DMS_RUN_GREETER=1 DMS_GREETER_BIN="$BIN" \
+        DMS_GREET_CFG_DIR="$CACHE" QT_NO_XDG_DESKTOP_PORTAL=1 QT_QPA_PLATFORM=wayland \
+        HYPRLAND_NO_SD_TARGET=1
+    cd "$gen_dir" || cd /
+    exec systemd-cat -t dms-greeter/hyprland start-hyprland -- --config "$gen"
+fi
+
+# ── Hyprland >= 0.57: dms-greeter starts the compositor ─────────────────
+# (it ignores -C there and uses its built-in Lua config, so the external-
+# display rule can't be injected this way; greeter-monitor-watch is not run)
+logger -t dms-greeter-launch "Hyprland $hypr_ver: launching through dms-greeter (Lua config)"
+if [ "$patched" = 1 ]; then
+    exec "$BIN" -c "$UI" "$@"
+fi
+logger -t dms-greeter-launch "patched UI missing or stale (want: $want); using the embedded UI"
+exec "$BIN" "$@"

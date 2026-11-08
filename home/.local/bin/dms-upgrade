@@ -8,7 +8,9 @@
 #      unpacks them to staged/;
 #   3. extracts the embedded UIs from the STAGED binaries (dux-extract-ui) and
 #      dry-runs every local patch against them: the 7 DMS shell patches via
-#      dms-shell-sync (DMS_SHELL_SRC), the greeter auth patch directly;
+#      dms-shell-sync (DMS_SHELL_SRC), the greeter auth patch directly, and
+#      dms-greeter-launch-check (does the login screen's own compositor
+#      launcher still match how the new dms-greeter starts its UI);
 #   4. prints that report, then installs exactly those debs with one pkexec
 #      (~/Documents/dms-upgrade-root.sh unholds, installs, re-holds; apt's
 #      Post-Invoke hook rebuilds the patched greeter UI);
@@ -113,6 +115,19 @@ if [ "$RECHECK" = 1 ] || [ ! -f "$DIR/summary" ]; then
         fi
     else
         results+=("dms-greeter-auth-patch FAIL (could not extract the greeter UI, see extract-greeter.log)")
+    fi
+
+    # The login screen's compositor setup, which /usr/local/bin/dms-greeter-launch
+    # replicates while Hyprland < 0.57 (dms-greeter 2.1 writes Lua configs:
+    # black login screen on 2026-11-08 that no patch test caught).
+    if command -v dms-greeter-launch-check >/dev/null 2>&1; then
+        if dms-greeter-launch-check "$(pick /usr/bin/dms-greeter)" >"$DIR/greeter-launch.log" 2>&1; then
+            results+=("dms-greeter-launch PASS")
+        else
+            results+=("dms-greeter-launch FAIL ($(head -1 "$DIR/greeter-launch.log" | sed 's/^FAIL: //'))")
+        fi
+    else
+        results+=("dms-greeter-launch FAIL (dms-greeter-launch-check not installed)")
     fi
 
     total=${#results[@]}
