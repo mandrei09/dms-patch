@@ -1,0 +1,6 @@
+*.bak
+*.bak[0-9]*
+*.bak-*
+*.bak.*
+*~
+__pycache__/

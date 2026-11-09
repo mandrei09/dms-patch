@@ -1,0 +1,37 @@
+# apt packages the DMS customisations need.
+#   <package>          must be installed and marked manual (autoremove-safe)
+#   <package> hold     also kept on apt-mark hold; dms-upgrade tests the
+#                      patches against a new version before installing it
+# Read by install.sh (--root sets the holds) and dms-update-check.
+dms hold
+dms-greeter hold
+quickshell hold
+danksearch hold
+dgop hold
+greetd
+grim
+slurp
+wl-clipboard
+tesseract-ocr
+tesseract-ocr-eng
+tesseract-ocr-ron
+python3-cairo
+python3-pygments
+jq
+rsync
+poppler-utils
+libglib2.0-bin
+libgtk-3-bin
+file
+libnotify-bin
+file-roller
+fd-find
+tmux
+zenity
+playerctl
+brightnessctl
+cliphist
+pipewire-bin
+wireplumber
+openssh-client
+# Not from apt: ~/.local/bin/satty (release binary), brew ripgrep (rg)
