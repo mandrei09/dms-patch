@@ -152,7 +152,8 @@ fi
 
 # GTK 4 / libadwaita apps (Nautilus, Satty, ...) take the accent from a
 # generated ~/.config/gtk-4.0/gtk.css; Satty's pen palette leads with it.
-for helper in gtk-accent satty-accent; do
+# launcher-icons-accent: DMS launcher's generic folder/file icons.
+for helper in gtk-accent satty-accent launcher-icons-accent; do
     if [ -x "$HOME/.local/bin/$helper" ]; then
         "$HOME/.local/bin/$helper" >/dev/null 2>&1 || true
     fi

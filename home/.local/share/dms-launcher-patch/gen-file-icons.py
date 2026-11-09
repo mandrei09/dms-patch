@@ -108,21 +108,30 @@ def main():
                  % os.path.basename(os.path.dirname(theme_dir)))
         fh.write('var T = %s;\n' % json.dumps(js, separators=(',', ':'), sort_keys=True))
         fh.write('''
+// The generic icons (plain folder/file) come recoloured in the DMS accent
+// from launcher-icons-accent's dir; every other icon keeps its own colours.
+var ACCENT = {"file.svg": 1, "folder.svg": 1, "folder-open.svg": 1};
+var ACCENT_DIR = "@ACCENT_ICONS_DIR@";
+
+function path(f) {
+    return (ACCENT[f] ? ACCENT_DIR : T.dir) + "/" + f;
+}
+
 // Absolute path of the icon for a file/folder base name, or "" if none.
 function iconFor(name, isDir) {
     var n = String(name || "").toLowerCase();
     if (isDir)
-        return T.dir + "/" + (T.folders[n] || T.folder);
+        return path(T.folders[n] || T.folder);
     if (T.names[n])
-        return T.dir + "/" + T.names[n];
+        return path(T.names[n]);
     var parts = n.split(".");
     // "a.spec.ts" -> try "spec.ts", then "ts" (longest first, as VS Code).
     for (var k = Math.min(T.maxExtParts, parts.length - 1); k >= 1; k--) {
         var e = parts.slice(parts.length - k).join(".");
         if (T.exts[e])
-            return T.dir + "/" + T.exts[e];
+            return path(T.exts[e]);
     }
-    return T.file ? T.dir + "/" + T.file : "";
+    return T.file ? path(T.file) : "";
 }
 ''')
     print('icons: %d svgs, %d names, %d exts, %d folders -> %s'

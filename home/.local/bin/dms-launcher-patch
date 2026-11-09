@@ -117,8 +117,14 @@ ICONS="$BASE/FileIcons.js"
 ICONS_SRC="${DMS_ICONS_SRC:-$HOME/.local/share/dms-launcher-patch/FileIcons.js}"
 if [ -f "$ICONS_SRC" ]; then
     # The generated file has @FILE_ICONS_DIR@ instead of an absolute path.
+    # @ACCENT_ICONS_DIR@: the generic folder/file icons in the DMS accent,
+    # written by launcher-icons-accent (also re-run by hypr-accent).
+    accent_icons="$HOME/.cache/accent/file-icons"
+    [ -x "$HOME/.local/bin/launcher-icons-accent" ] \
+        && "$HOME/.local/bin/launcher-icons-accent" >/dev/null 2>&1 || true
     icons_tmp=$(mktemp)
-    sed "s|@FILE_ICONS_DIR@|$(dirname "$ICONS_SRC")/file-icons|" "$ICONS_SRC" > "$icons_tmp"
+    sed -e "s|@FILE_ICONS_DIR@|$(dirname "$ICONS_SRC")/file-icons|" \
+        -e "s|@ACCENT_ICONS_DIR@|$accent_icons|" "$ICONS_SRC" > "$icons_tmp"
     if cmp -s "$icons_tmp" "$ICONS" 2>/dev/null; then
         rm -f "$icons_tmp"
         echo "FileIcons.js:                 unchanged"

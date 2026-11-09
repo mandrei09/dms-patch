@@ -1,0 +1,57 @@
+#!/usr/bin/python3 -I
+"""launcher-icons-accent -- DMS launcher's generic file/folder icons in the accent.
+
+The launcher's per-file-type icons (dms-launcher-patch, FileIcons.js) are
+Material Icon Theme SVGs with fixed colours. The three generic ones (plain
+folder, open folder, plain file) should look like the rest of DMS instead, so
+this writes copies of them into ~/.cache/accent/file-icons with every fill set
+to DMS's live `primary` (the colour DMS draws its own highlights in).
+FileIcons.js loads those three from there (T.accentDir).
+
+Run by hypr-accent (palette changes) and dms-launcher-patch (first install).
+The shell caches images, so open launchers repaint after a DMS restart.
+"""
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+RESOLVE = HOME / ".local/bin/accent-resolve.py"
+SRC = HOME / ".local/share/dms-launcher-patch/file-icons"
+OUT = HOME / ".cache/accent/file-icons"
+ICONS = ("folder.svg", "folder-open.svg", "file.svg")
+FALLBACK = "#90a4ae"  # Material Icon Theme's own grey
+
+
+def primary():
+    out = subprocess.run([sys.executable, "-I", str(RESOLVE), "--all"],
+                         capture_output=True, text=True).stdout
+    try:
+        data = json.loads(out)
+        mode = "light" if data.get("mode") == "light" else "dark"
+        return data["colors"][mode]["primary"].lower()
+    except Exception:
+        return FALLBACK
+
+
+def main():
+    colour = primary()
+    OUT.mkdir(parents=True, exist_ok=True)
+    for name in ICONS:
+        src = SRC / name
+        if not src.is_file():
+            continue
+        svg = re.sub(r'fill="#[0-9a-fA-F]{3,8}"', f'fill="{colour}"', src.read_text())
+        dst = OUT / name
+        if not dst.is_file() or dst.read_text() != svg:
+            tmp = dst.with_suffix(".tmp")
+            tmp.write_text(svg)
+            tmp.replace(dst)
+    print(f"launcher icons {colour} -> {OUT}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
