@@ -84,7 +84,9 @@ link_state() {   # ok | missing | other:<where> | real | folded:<dir>
     fi
 }
 
-# Units under home/.config/systemd/user that carry WantedBy=.
+# Units under home/.config/systemd/user that carry WantedBy=. They are pulled
+# in by the tracked <target>.d/dms-patch.conf drop-ins (Wants=), not by .wants
+# links: those folders belong to the dotfiles repo.
 wanted_units() {
     local u
     for u in "$H/$UNITDIR"/*.service "$H/$UNITDIR"/*.path "$H/$UNITDIR"/*.timer; do
@@ -110,7 +112,7 @@ docker_patch_state() {   # applied | pending | absent | conflict
 
 # ── user side ───────────────────────────────────────────────────────────
 do_user() {
-    local rel st t blocked=0 u target
+    local rel st t blocked=0
     while read -r rel; do
         st=$(link_state "$rel")
         [ "${st%%:*}" = folded ] || continue
@@ -136,15 +138,6 @@ do_user() {
         run ln -sfn "$H/$rel" "$t"
     done < <(rel_entries)
 
-    # enable units without needing a running user manager (works offline)
-    while read -r u target; do
-        t="$HOME/$UNITDIR/$target.wants/$u"
-        [ "$(readlink "$t" 2>/dev/null)" = "$HOME/$UNITDIR/$u" ] && continue
-        say "enable  $u ($target)"
-        run mkdir -p "$(dirname "$t")"
-        run ln -sfn "$HOME/$UNITDIR/$u" "$t"
-    done < <(wanted_units)
-
     # snip's icon font: a private copy of the one DMS ships (see snip/shell.qml)
     local src; src=$(font_src)
     if [ -n "$src" ] && ! cmp -s "$src" "$FONT_DST"; then
@@ -166,16 +159,12 @@ do_user() {
 }
 
 do_uninstall() {
-    local rel t u target
+    local rel t
     while read -r rel; do
         t="$HOME/$rel"
         [ "$(link_state "$rel")" = ok ] || continue
         say "unlink  ~/$rel"; run rm -f "$t"
     done < <(rel_entries)
-    while read -r u target; do
-        t="$HOME/$UNITDIR/$target.wants/$u"
-        [ -L "$t" ] && { say "disable $u"; run rm -f "$t"; }
-    done < <(wanted_units)
     say "Root files are left alone; remove them by hand if wanted (see README)."
 }
 
@@ -224,6 +213,13 @@ do_root() {
         dpkg-query -W "$h" >/dev/null 2>&1 || continue
         apt-mark showhold | grep -qx "$h" || { say "hold    $h"; run apt-mark hold "$h" >/dev/null; }
     done
+    local pkg missing=()
+    for pkg in $(awk '!/^#/ && NF { print $1 }' "$REPO/deps.txt"); do
+        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'ok installed'; then missing+=("$pkg")
+        elif apt-mark showauto "$pkg" | grep -qx "$pkg"; then say "manual  $pkg"; run apt-mark manual "$pkg" >/dev/null
+        fi
+    done
+    [ ${#missing[@]} = 0 ] || echo "! missing packages: apt-get install ${missing[*]}"
     [ "$changed" = 1 ] || { say "Root files already match the repo."; return; }
     run systemd-tmpfiles --create /etc/tmpfiles.d/polkit-fprint-skip.conf
     run systemctl daemon-reload
@@ -254,8 +250,8 @@ do_check() {
     done < <(find "$HOME/.local/bin" "$HOME/.local/share" "$HOME/.config/dms/plugins" "$HOME/.config/quickshell" \
                   "$HOME/$UNITDIR" -maxdepth 3 -xtype l -lname "$H/*" 2>/dev/null)
     while read -r u target; do
-        t="$HOME/$UNITDIR/$target.wants/$u"
-        [ -L "$t" ] || bad "$u is not enabled ($target.wants)"
+        grep -qE "^Wants=.*\b${u//./\\.}\b" "$H/$UNITDIR/$target.d/dms-patch.conf" 2>/dev/null \
+            || bad "$u has WantedBy=$target but is missing from $target.d/dms-patch.conf"
     done < <(wanted_units)
     src=$(font_src)
     [ -z "$src" ] || cmp -s "$src" "$FONT_DST" || bad "snip icon font missing or stale ($FONT_DST)"
