@@ -61,6 +61,13 @@ EOF
 # and org.freedesktop.Notifications. Their accent.css / border-color blocks
 # lived here. DMS is now the accent source itself (see the header).
 
+# GNOME's named accent-color, plus the Yaru icon/GTK theme variant, nearest
+# to the DMS primary (Adwaita's folders and GTK 3 selection are fixed blue).
+# Runs before the settings.ini sync below so both pick up the new themes.
+if [ -x "$HOME/.local/bin/gnome-accent" ]; then
+    "$HOME/.local/bin/gnome-accent" >/dev/null 2>&1 || true
+fi
+
 # Keep the GTK settings.ini files (shared with GNOME) in step with the
 # live theme, so switching accent in GNOME Settings can never leave them
 # pointing at a stale Yaru variant.
@@ -145,9 +152,7 @@ fi
 
 # GTK 4 / libadwaita apps (Nautilus, Satty, ...) take the accent from a
 # generated ~/.config/gtk-4.0/gtk.css; Satty's pen palette leads with it.
-# gnome-accent sets GNOME's named accent-color (portal, Flatpak, GNOME
-# Settings) to the closest match for the DMS primary.
-for helper in gtk-accent satty-accent gnome-accent; do
+for helper in gtk-accent satty-accent; do
     if [ -x "$HOME/.local/bin/$helper" ]; then
         "$HOME/.local/bin/$helper" >/dev/null 2>&1 || true
     fi

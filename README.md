@@ -102,7 +102,7 @@ On Arch, pick the **Hyprland (DMS)** session once at the login screen.
 DMS is the accent source. `hypr-accent.path` watches it, `accent-resolve.py` writes
 `~/.cache/accent/palette.json`, and `hypr-accent` fans it out to Hyprland and the
 `*-accent` scripts (ghostty, kitty, gtk, tmux, starship, satty, yazi, pulsar,
-gnome: nearest named GNOME `accent-color`).
+gnome: nearest GNOME `accent-color` plus Yaru icon/GTK theme variant).
 
 ### Overlays (`home/.config/quickshell`)
 - `altswitcher`: Alt+Tab with live thumbnails.

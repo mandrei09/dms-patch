@@ -1,5 +1,5 @@
 #!/usr/bin/python3 -I
-"""gnome-accent -- point GNOME's accent-color at the nearest match for DMS.
+"""gnome-accent -- point GNOME's accent settings at the nearest match for DMS.
 
 org.gnome.desktop.interface accent-color is an enum of nine named colours
 (libadwaita 1.6+, the portal's org.freedesktop.appearance accent-color, GNOME
@@ -7,8 +7,16 @@ Settings, Flatpak apps). It can't hold an arbitrary hex, so this picks the
 named accent whose hue is closest to DankMaterialShell's live `primary`
 (accent-resolve.py --json), or slate for a near-grey palette.
 
-Run by hypr-accent. Writes only on a change; hypr-accent-watch sees the
-accent-color flip but hypr-accent's change key ignores it, so no loop.
+Icons and GTK 3 can't follow accent-color at all: Adwaita's folder icons and
+its GTK 3 selection are a fixed blue. Yaru ships one theme per accent, so the
+icon theme and GTK theme are switched to the nearest installed Yaru variant
+(-dark in dark mode). Only an Adwaita or Yaru theme is replaced, never some
+other theme picked by hand. DMS leaves the icon theme alone while its own
+icon-theme setting is "System Default".
+
+Run by hypr-accent. Writes only on a change. A changed icon/GTK theme makes
+hypr-accent run once more (its change key includes them); this script is
+idempotent, so that second pass settles.
 """
 import colorsys
 import json
@@ -24,6 +32,51 @@ GNOME = {
     "yellow": "#c88800", "orange": "#ed5b00", "red": "#e62d42",
     "pink": "#d56199", "purple": "#9141ac", "slate": "#6f8396",
 }
+
+
+# Yaru accent colours (yaru's accent-colors). Plain "Yaru" is the orange one.
+YARU = {
+    "Yaru": "#e95420", "Yaru-bark": "#787859", "Yaru-sage": "#657b69",
+    "Yaru-olive": "#4b8501", "Yaru-viridian": "#03875b",
+    "Yaru-prussiangreen": "#308280", "Yaru-blue": "#0073e5",
+    "Yaru-purple": "#7764d8", "Yaru-magenta": "#b34cb3", "Yaru-red": "#da3450",
+    "Yaru-wartybrown": "#b39169", "Yaru-yellow": "#c88800",
+}
+ICON_DIRS = [Path.home() / ".local/share/icons", Path.home() / ".icons", Path("/usr/share/icons")]
+THEME_DIRS = [Path.home() / ".local/share/themes", Path.home() / ".themes", Path("/usr/share/themes")]
+
+
+def hue_dist(a, b):
+    d = abs(hls(a)[0] - hls(b)[0])
+    return min(d, 1 - d)
+
+
+def installed(name, dirs):
+    return any((d / name).is_dir() for d in dirs)
+
+
+def nearest_yaru(hexstr, dark, dirs):
+    suffix = "-dark" if dark else ""
+    have = [n for n in YARU if installed(n + suffix, dirs)]
+    if not have:
+        return None
+    return min(have, key=lambda n: hue_dist(hexstr, YARU[n])) + suffix
+
+
+def gget(key):
+    return subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", key],
+                          capture_output=True, text=True).stdout.strip().strip("'")
+
+
+def gset(key, value):
+    if gget(key) != value:
+        subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", key, value],
+                       check=True)
+
+
+def ours(theme):
+    """Adwaita or Yaru*: themes this script may replace."""
+    return theme in ("Adwaita", "Adwaita-dark", "") or theme == "Yaru" or theme.startswith("Yaru-")
 
 
 def hls(hexstr):
@@ -42,25 +95,30 @@ def nearest(hexstr):
 
 
 def main():
-    out = subprocess.run([sys.executable, "-I", str(RESOLVE), "--json"],
+    out = subprocess.run([sys.executable, "-I", str(RESOLVE), "--all"],
                          capture_output=True, text=True).stdout
     try:
-        primary = json.loads(out).get("primary")
+        data = json.loads(out)
+        dark = data.get("mode") != "light"
+        primary = data["colors"]["dark" if dark else "light"].get("primary")
     except Exception:
         primary = None
     if not primary:
-        print("gnome-accent: no DMS palette, leaving accent-color alone", file=sys.stderr)
+        print("gnome-accent: no DMS palette, leaving GNOME settings alone", file=sys.stderr)
         return 1
-    want = nearest(primary)
+    accent = nearest(primary)
+    icons = nearest_yaru(primary, dark, ICON_DIRS)
+    gtk = nearest_yaru(primary, dark, THEME_DIRS)
     if "--print" in sys.argv:
-        print(want)
+        print(accent, icons or "-", gtk or "-")
         return 0
-    cur = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "accent-color"],
-                         capture_output=True, text=True).stdout.strip().strip("'")
-    if cur != want:
-        subprocess.run(["gsettings", "set", "org.gnome.desktop.interface", "accent-color", want],
-                       check=True)
-    print(f"gnome accent {want} (DMS primary {primary})")
+    gset("accent-color", accent)
+    if icons and ours(gget("icon-theme")):
+        gset("icon-theme", icons)
+    if gtk and ours(gget("gtk-theme")):
+        gset("gtk-theme", gtk)
+    print(f"gnome accent {accent}, icons {gget('icon-theme')}, gtk {gget('gtk-theme')}"
+          f" (DMS primary {primary})")
     return 0
 
 
