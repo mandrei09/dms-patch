@@ -1,0 +1,124 @@
+diff --git a/DockerService.qml b/DockerService.qml
+index 80743a1..5a70a70 100644
+--- a/DockerService.qml
++++ b/DockerService.qml
+@@ -77,7 +77,7 @@ Item {
+             onRead: data => {
+                 try {
+                     const event = JSON.parse(data);
+-                    const action = event.Status || event.status;
++                    const action = event.Action || event.Status || event.status;
+ 
+                     if (["start", "stop", "die", "died", "kill", "restart", "pause", "unpause", "create", "destroy", "remove", "cleanup"].includes(action)) {
+                         console.log(`DockerManager: Container event detected - ${action}`);
+diff --git a/DockerWidget.qml b/DockerWidget.qml
+index 8750613..69e40aa 100644
+--- a/DockerWidget.qml
++++ b/DockerWidget.qml
+@@ -2,6 +2,7 @@ import QtQuick
+ import qs.Common
+ import qs.Services
+ import qs.Widgets
++import qs.DCommon.Widgets
+ import qs.Modules.Plugins
+ 
+ PluginComponent {
+@@ -366,7 +367,7 @@ PluginComponent {
+         return globalComposeProjects.value.findIndex(p => p.name === projectName);
+     }
+ 
+-    component DockerIcon: DankNFIcon {
++    component DockerIcon: DNFIcon {
+         name: "docker"
+         size: root.iconSize
+         color: {
+@@ -402,7 +403,7 @@ PluginComponent {
+         border.width: Theme.layerOutlineWidth
+         border.color: Theme.outlineLight
+ 
+-        DankIcon {
++        DIcon {
+             name: "account_tree"
+             size: Theme.iconSize + 2
+             color: {
+@@ -460,7 +461,7 @@ PluginComponent {
+             }
+         }
+ 
+-        DankIcon {
++        DIcon {
+             name: isExpanded ? "expand_less" : "expand_more"
+             size: Theme.iconSize
+             color: Theme.surfaceText
+@@ -508,7 +509,7 @@ PluginComponent {
+             }
+         }
+ 
+-        DankIcon {
++        DIcon {
+             id: containerIcon
+             name: "deployed_code"
+             size: containerHeader.iconSize
+@@ -590,7 +591,7 @@ PluginComponent {
+                         anchors.centerIn: parent
+                         spacing: Theme.spacingXS
+ 
+-                        DankIcon {
++                        DIcon {
+                             name: "cloud"
+                             size: 13
+                             color: Theme.primary
+@@ -612,7 +613,7 @@ PluginComponent {
+                             anchors.verticalCenter: parent.verticalCenter
+                         }
+ 
+-                        DankIcon {
++                        DIcon {
+                             name: "deployed_code"
+                             size: 13
+                             color: Qt.rgba(Theme.primary.r, Theme.primary.g, Theme.primary.b, 0.8)
+@@ -630,7 +631,7 @@ PluginComponent {
+             }
+         }
+ 
+-        DankIcon {
++        DIcon {
+             id: expandIcon
+             name: isExpanded ? "expand_less" : "expand_more"
+             size: containerHeader.iconSize
+@@ -928,7 +929,7 @@ PluginComponent {
+                     }
+                 }
+ 
+-                DankListView {
++                DListView {
+                     id: containerList
+                     width: parent.width
+                     height: root.popoutHeight - 46 - Theme.spacingXL
+@@ -992,7 +993,7 @@ PluginComponent {
+                     }
+                 }
+ 
+-                DankListView {
++                DListView {
+                     id: projectList
+                     width: parent.width
+                     height: root.popoutHeight - 46 - Theme.spacingXL
+@@ -1166,7 +1167,7 @@ PluginComponent {
+         radius: Theme.cornerRadius
+         color: isActive ? Theme.primaryHover : mouseArea.containsMouse ? Theme.surfaceHover : "transparent"
+ 
+-        DankIcon {
++        DIcon {
+             anchors.centerIn: parent
+             name: iconName
+             size: 18
+@@ -1203,7 +1204,7 @@ PluginComponent {
+             anchors.leftMargin: actionButton.leftIndent
+             spacing: Theme.spacingM
+ 
+-            DankIcon {
++            DIcon {
+                 name: actionButton.icon
+                 size: Theme.iconSize
+                 color: Theme.surfaceText
