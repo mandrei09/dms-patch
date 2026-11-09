@@ -1,0 +1,20 @@
+#%PAM-1.0
+# greetd (DMS login screen), Arch version; see docs/greeter.md in
+# github.com/mandrei09/dms-patch. The patched greeter runs back-to-back 3 s
+# fingerprint windows while the password field is empty; a password attempt in
+# a fresh session touches the skip-fprint flag, so pam_exec jumps over
+# pam_fprintd straight to the password (system-local-login).
+# A fingerprint login cannot unlock the GNOME keyring (no password to unlock with).
+#
+# The skip jumps exactly ONE line: keep pam_fprintd a plain `auth` line (see
+# the note in polkit-1). Don't let `dms greeter sync` add its own fprintd block
+# above these lines.
+auth       requisite                   pam_nologin.so
+auth       [success=1 default=ignore]  pam_exec.so quiet quiet_log /usr/local/libexec/greetd-skip-fprint
+auth       sufficient                  pam_fprintd.so max-tries=3 timeout=3
+auth       include                     system-local-login
+-auth      optional                    pam_gnome_keyring.so
+account    include                     system-local-login
+password   include                     system-local-login
+session    include                     system-local-login
+-session   optional                    pam_gnome_keyring.so auto_start

@@ -1,0 +1,17 @@
+#%PAM-1.0
+# Polkit prompts (pkexec, DMS dialogs), Arch version: fingerprint first (3 tries,
+# 10 s each), then the normal system-auth stack (password).
+# Typing in the DMS dialog while the fingerprint step runs ends it at once: the dialog
+# touches /run/polkit-fprint-skip/<uid>, polkit-fprint-skip.path stops the waiting helper,
+# and the retry skips pam_fprintd (line 1). See docs/polkit-fprint-skip.md in dms-patch.
+# Overrides /usr/lib/pam.d/polkit-1; delete this file to go back to stock behaviour.
+#
+# The skip jumps exactly ONE line, so pam_fprintd must stay a plain `auth` line:
+# with `-auth` a missing module would vanish from the stack and the jump would
+# land past system-auth.
+auth       [success=1 default=ignore]  pam_exec.so quiet /usr/local/sbin/polkit-fprint-skip-check
+auth       sufficient                  pam_fprintd.so max-tries=3 timeout=10
+auth       include                     system-auth
+account    include                     system-auth
+password   include                     system-auth
+session    include                     system-auth

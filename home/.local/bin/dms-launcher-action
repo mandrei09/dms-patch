@@ -320,6 +320,14 @@ def uninstall_plan(did):
         steps.insert(0, {"argv": ["env", "DEBIAN_FRONTEND=noninteractive", "apt-get", "remove", "-y", sname], "root": True})
         others = [r for r in removed if r != sname]
         lines.insert(0, "apt package " + sname + " is removed" + (", together with " + str(len(others)) + " package(s) that depend on it:\n  " + ", ".join(others) if others else ".") )
+    elif kind == "pacman":
+        # --print lists what -R would remove; it fails when other packages need it
+        sim = subprocess.run(["pacman", "-R", "--print", "--print-format", "%n", sname],
+                             capture_output=True, text=True, timeout=20)
+        if sim.returncode != 0:
+            return {"error": "pacman would not remove " + sname + ":\n" + "\n".join((sim.stderr or sim.stdout).splitlines()[-3:])}
+        steps.insert(0, {"argv": ["pacman", "-R", "--noconfirm", sname], "root": True})
+        lines.insert(0, "pacman package " + sname + " is removed.")
     elif kind == "Homebrew":
         argv = mod.program_argv(desktop_field(src_desk, "Exec") or exec_line)
         real = os.path.realpath(shutil.which(argv[0]) or argv[0]) if argv else ""

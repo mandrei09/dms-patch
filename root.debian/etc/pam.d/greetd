@@ -6,9 +6,6 @@
 # fresh session touches the skip-fprint flag, so pam_exec jumps to pam_unix.
 # A fingerprint login cannot unlock the GNOME keyring (no password to unlock with).
 # Mirrors /etc/pam.d/login otherwise.
-# BEGIN DMS GREETER AUTH (managed by dms greeter sync)
-auth sufficient pam_fprintd.so max-tries=2 timeout=10
-# END DMS GREETER AUTH
 auth       optional   pam_faildelay.so  delay=3000000
 auth       requisite  pam_nologin.so
 auth       [success=1 default=ignore] pam_exec.so quiet quiet_log /usr/local/libexec/greetd-skip-fprint

@@ -25,7 +25,9 @@ REPORT="$OUT_DIR/report.txt"
 mkdir -p "$OUT_DIR"
 # The dms-patch checkout this script is linked from (deps.txt, root/, install.sh).
 REPO=$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)
-DEPS="$REPO/deps.txt"
+. "$REPO/lib/pkg.sh"
+DISTRO=$(distro)
+DEPS="$REPO/deps/$DISTRO.txt"
 
 problems=()
 add() { problems+=("$*"); }
@@ -34,7 +36,8 @@ add() { problems+=("$*"); }
 # The Dux stack is on apt-mark hold (2026-11-08); dms-upgrade tests the local
 # patches against a new version before installing it. --check downloads and
 # tests once per candidate set (cached), so this is cheap after the first run.
-if command -v dms-upgrade >/dev/null 2>&1; then
+# Debian only: Arch has no held packages; section 1b covers pacman updates.
+if [ "$DISTRO" = debian ] && command -v dms-upgrade >/dev/null 2>&1; then
     if ! dms-upgrade --check >"$OUT_DIR/dms-upgrade-check.log" 2>&1; then
         add "dms-upgrade --check failed: $(tail -1 "$OUT_DIR/dms-upgrade-check.log")"
     elif ! grep -q '^Dux packages are up to date' "$OUT_DIR/dms-upgrade-check.log"; then
@@ -43,14 +46,14 @@ if command -v dms-upgrade >/dev/null 2>&1; then
     fi
 fi
 held=$(apt-mark showhold 2>/dev/null)
-for p in $(awk '$2 == "hold" { print $1 }' "$DEPS"); do
+for p in $(awk '$2 == "hold" { print $1 }' "$DEPS" 2>/dev/null); do
     dpkg-query -W "$p" >/dev/null 2>&1 || continue
     printf '%s\n' "$held" | grep -qx "$p" \
         || add "$p is not on hold, so apt upgrade can update it untested (fix: pkexec apt-mark hold $p)"
 done
 
 # ── 0b. patched login screen matches the installed versions ─────────────
-want="$(dpkg-query -W -f='${Version}' dms 2>/dev/null) $(dpkg-query -W -f='${Version}' dms-greeter 2>/dev/null)"
+want="$(pkg_ver dms /usr/bin/dms) $(pkg_ver dms-greeter /usr/bin/dms-greeter)"
 if [ -x /usr/local/bin/dms-greeter-launch ] \
    && [ "$(cat /usr/local/share/dms-greeter-shell/.built-for 2>/dev/null)" != "$want" ]; then
     add "login screen runs the STOCK greeter: dms-greeter-auth-patch not built for $want (journalctl -t dms-greeter-ui-rebuild)"
@@ -68,7 +71,7 @@ if [ -f "$LAUNCHER_SRC" ] && ! cmp -s "$LAUNCHER_SRC" "$LAUNCHER"; then
     add "dms-greeter-launch differs from the dms-patch copy (install: $REPO/install.sh --root)"
 fi
 if [ -x /usr/bin/dms-greeter ] && command -v dms-greeter-launch-check >/dev/null 2>&1; then
-    key=$(stat -c '%n %Y %s' /usr/bin/dms-greeter "$LAUNCHER" 2>/dev/null; dpkg-query -W -f='${Version}' hyprland 2>/dev/null)
+    key=$(stat -c '%n %Y %s' /usr/bin/dms-greeter "$LAUNCHER" 2>/dev/null; pkg_ver hyprland /usr/bin/Hyprland)
     if [ "$(cat "$OUT_DIR/greeter-launch.key" 2>/dev/null)" != "$key" ]; then
         dms-greeter-launch-check >"$OUT_DIR/greeter-launch.txt" 2>&1
         printf '%s\n' "$key" >"$OUT_DIR/greeter-launch.key"
@@ -152,16 +155,17 @@ done
 
 # ── 4. commands and packages the local tooling needs ────────────────────
 # Must be installed AND marked manual, so `apt autoremove` can't take them.
-mapfile -t REQUIRED_PKGS < <(awk '!/^#/ && NF && $2 != "hold" { print $1 }' "$DEPS"; echo danksearch)
+mapfile -t REQUIRED_PKGS < <(awk '!/^#/ && NF { print $1 }' "$DEPS" 2>/dev/null)
+[ -f "$DEPS" ] || add "no dependency list for this distro ($DEPS)"
 for p in "${REQUIRED_PKGS[@]}"; do
-    if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -qE '^(install|hold) ok installed'; then
-        add "package missing: $p (reinstall: pkexec apt-get install $p)"
-    elif apt-mark showauto "$p" 2>/dev/null | grep -qx "$p"; then
-        add "package only auto-installed, autoremove may take it: $p (fix: pkexec apt-mark manual $p)"
+    if ! pkg_installed "$p"; then
+        add "package missing: $p (fix: $REPO/install.sh --deps)"
+    elif ! pkg_explicit "$p"; then
+        add "package only installed as a dependency, autoremove may take it: $p (fix: $REPO/install.sh --root)"
     fi
 done
-for c in "$HOME_DIR/.local/bin/satty" /home/linuxbrew/.linuxbrew/bin/rg; do
-    [ -x "$c" ] || add "missing non-apt tool: $c"
+for c in satty rg; do
+    command -v "$c" >/dev/null 2>&1 || add "missing tool: $c"
 done
 
 # ── 4b. dms-patch links and root files match the repo ──────────────────

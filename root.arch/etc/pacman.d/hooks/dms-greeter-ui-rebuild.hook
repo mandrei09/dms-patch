@@ -1,0 +1,13 @@
+# Rebuild the patched DMS greeter UI after dux-shell / dms-greeter updates
+# (dms-patch: root.arch/). Arch counterpart of the Debian apt hook.
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Path
+Target = usr/bin/dms
+Target = usr/bin/dms-greeter
+
+[Action]
+Description = Rebuilding the patched DMS greeter UI...
+When = PostTransaction
+Exec = /usr/local/sbin/dms-greeter-ui-rebuild

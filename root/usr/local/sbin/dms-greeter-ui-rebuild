@@ -15,7 +15,14 @@ BIN=/usr/bin/dms-greeter
 UI=/usr/local/share/dms-greeter-shell
 PATCH=/usr/local/lib/dms-greeter-auth/dms-greeter-auth-patch
 [ -x "$BIN" ] || exit 0
-want="$(dpkg-query -W -f='${Version}' dms 2>/dev/null) $(dpkg-query -W -f='${Version}' dms-greeter 2>/dev/null)"
+# Package version on Debian (by name) or Arch (owner of the file; the Arch
+# names differ). Inline on purpose: the login screen must not depend on the
+# dms-patch checkout. Same as lib/pkg.sh there.
+pkg_ver() {
+    _v=$(dpkg-query -W -f='${Version}' "$1" 2>/dev/null) && [ -n "$_v" ] && { echo "$_v"; return; }
+    command -v pacman >/dev/null 2>&1 && pacman -Qo "$2" 2>/dev/null | awk '{print $NF}'
+}
+want="$(pkg_ver dms /usr/bin/dms) $(pkg_ver dms-greeter /usr/bin/dms-greeter)"
 sum=$(sha256sum "$PATCH" | cut -d' ' -f1)
 [ "$(cat "$UI/.built-for" 2>/dev/null)" = "$want" ] && [ "$(cat "$UI/.patch-sha" 2>/dev/null)" = "$sum" ] && exit 0
 

@@ -2,8 +2,10 @@
 # dms-patch installer.
 #
 #   ./install.sh [--user]        link home/ into $HOME, enable the user units (default)
-#   ./install.sh --root [--yes]  copy root/ into / (re-runs itself via pkexec);
-#                                shows a diff and asks before replacing each file
+#   ./install.sh --deps          install the packages in deps/<distro>.txt
+#                                (apt on Debian/Ubuntu; pacman + paru/yay on Arch)
+#   ./install.sh --root [--yes]  copy root/ + root.<distro>/ into / (re-runs itself
+#                                via pkexec); shows a diff and asks per changed file
 #   ./install.sh --check         report drift on both sides, change nothing (exit 1 = drift)
 #   ./install.sh --uninstall     remove the $HOME links that point into this repo
 #   -n / --dry-run               print what --user/--root would do
@@ -13,12 +15,17 @@
 # repo, so `git status` shows every change. Most entries are linked file by
 # file. The directories in DIR_LINKS (and every child of DIR_LINK_PARENTS) are
 # linked whole, because tools write generated files into them.
-# root/ is copied, because root must not run files a user can edit.
+# root/ is copied, because root must not run files a user can edit. Files in
+# root.debian/ or root.arch/ are added for (or override root/ on) that distro.
+# The distro comes from /etc/os-release; DMS_PATCH_DISTRO=arch|debian overrides.
 set -uo pipefail
 
 REPO=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 H="$REPO/home"
-R="$REPO/root"
+. "$REPO/lib/pkg.sh"
+DISTRO=$(distro)
+DEPS="$REPO/deps/$DISTRO.txt"
+ROOTS=("$REPO/root" "$REPO/root.$DISTRO")
 DIR_LINK_PARENTS=(.config/dms/plugins .config/quickshell)
 DIR_LINKS=(.local/share/dms-launcher-patch .local/share/vscode-dark-modern)
 STAMP=$(date +%Y%m%d-%H%M%S)
@@ -29,12 +36,13 @@ for a in "$@"; do
     case "$a" in
         --user) MODE=user ;;
         --root) MODE=root ;;
+        --deps) MODE=deps ;;
         --check) MODE=check ;;
         --uninstall) MODE=uninstall ;;
         -n|--dry-run) DRY=1 ;;
         -y|--yes) YES=1 ;;
         -q|--quiet) QUIET=1 ;;
-        -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
         *) echo "install.sh: unknown option $a" >&2; exit 2 ;;
     esac
 done
@@ -96,8 +104,11 @@ wanted_units() {
 }
 
 FONT_DST="$HOME/.local/share/fonts/MaterialSymbolsRounded-snip.ttf"
+# Arch's dux-shell ships no /usr/share/quickshell/dms; there the font only
+# exists in the tree dms-shell-sync extracts on the first DMS start.
 font_src() {
-    find /usr/share/quickshell/dms -name 'MaterialSymbolsRounded*.ttf' -print -quit 2>/dev/null
+    find /usr/share/quickshell/dms "$HOME/.cache/dms-shell-src" "$HOME/.local/share/dms-shell" \
+        -name 'MaterialSymbolsRounded*.ttf' -print -quit 2>/dev/null
 }
 
 DOCKER_PLUGIN="$HOME/.config/dms/plugins/dockerManager"
@@ -169,18 +180,66 @@ do_uninstall() {
 }
 
 # ── root side ───────────────────────────────────────────────────────────
-DIVERSIONS=(
+# Debian: our hyprland.desktop replaces the package's (dpkg-divert keeps
+# apt from overwriting it). Arch installs its own hyprland-dms.desktop instead.
+DIVERSIONS=()
+[ "$DISTRO" = debian ] && DIVERSIONS=(
     "/usr/share/wayland-sessions/hyprland.desktop /usr/share/wayland-sessions/hyprland.desktop.pkg"
     "/usr/share/wayland-sessions/hyprland-uwsm.desktop /usr/share/wayland-sessions/hyprland-uwsm.desktop.disabled"
 )
-holds() { awk '$2 == "hold" { print $1 }' "$REPO/deps.txt"; }
+deps() { awk -v want="${1:-}" '!/^#/ && NF && ((want == "") || ($2 == want)) { print $1 }' "$DEPS" 2>/dev/null; }
+
+need_distro() {
+    case "$DISTRO" in debian|arch) ;; *)
+        echo "install.sh: unsupported distro (not Debian/Ubuntu or Arch); set DMS_PATCH_DISTRO" >&2; exit 2 ;;
+    esac
+}
+
+# "<repo file>\t<live path>" for every root file; root.<distro>/ wins over root/.
+root_files() {
+    declare -A seen=()
+    local dir f live
+    for dir in "${ROOTS[@]}"; do
+        [ -d "$dir" ] || continue
+        while IFS= read -r f; do seen[${f#"$dir"}]=$f; done < <(find "$dir" -type f)
+    done
+    for live in "${!seen[@]}"; do printf '%s\t%s\n' "${seen[$live]}" "$live"; done | sort -t$'\t' -k2
+}
+
+do_deps() {
+    need_distro
+    local p missing=() aur=()
+    for p in $(deps); do pkg_installed "$p" || missing+=("$p"); done
+    [ ${#missing[@]} = 0 ] && { say "All packages from deps/$DISTRO.txt are installed."; return; }
+    if [ "$DISTRO" = debian ]; then
+        say "apt install: ${missing[*]}"
+        run sudo apt-get install -y "${missing[@]}"
+        return
+    fi
+    local repo=()
+    for p in "${missing[@]}"; do
+        if deps aur | grep -qx "$p"; then aur+=("$p"); else repo+=("$p"); fi
+    done
+    [ ${#repo[@]} = 0 ] || { say "pacman: ${repo[*]}"; run sudo pacman -S --needed --noconfirm "${repo[@]}"; }
+    if [ ${#aur[@]} -gt 0 ]; then
+        local helper; helper=$(command -v paru || command -v yay)
+        if [ -z "$helper" ]; then
+            echo "! AUR packages need an AUR helper: ${aur[*]}" >&2
+            echo "  e.g.: sudo pacman -S --needed base-devel git && git clone https://aur.archlinux.org/paru-bin.git && (cd paru-bin && makepkg -si)" >&2
+            exit 1
+        fi
+        say "$(basename "$helper"): ${aur[*]}"
+        run "$helper" -S --needed --noconfirm "${aur[@]}"
+    fi
+}
 
 do_root() {
     if [ "$(id -u)" != 0 ]; then
         local args=(--root); [ "$DRY" = 1 ] && args+=(-n); [ "$YES" = 1 ] && args+=(-y)
         exec pkexec "$REPO/install.sh" "${args[@]}"
     fi
-    local d f rel live mode changed=0 ans
+    need_distro
+    local d f live mode changed=0 ans
     for d in "${DIVERSIONS[@]}"; do
         set -- $d
         if ! dpkg-divert --list "$1" | grep -q .; then
@@ -188,9 +247,7 @@ do_root() {
             run dpkg-divert --local --rename --divert "$2" --add "$1"
         fi
     done
-    while IFS= read -r f; do
-        rel=${f#"$R"}
-        live=$rel
+    while IFS=$'\t' read -r f live; do
         mode=$(stat -c %a "$f")
         if cmp -s "$f" "$live"; then
             [ "$(stat -c %a "$live")" = "$mode" ] && continue
@@ -207,19 +264,26 @@ do_root() {
         say "install $live"
         run install -D -o root -g root -m "$mode" "$f" "$live"
         changed=1
-    done < <(find "$R" -type f | sort)
+    done < <(root_files)
 
-    local h; for h in $(holds); do
-        dpkg-query -W "$h" >/dev/null 2>&1 || continue
+    local h; for h in $(deps hold); do
+        pkg_installed "$h" || continue
         apt-mark showhold | grep -qx "$h" || { say "hold    $h"; run apt-mark hold "$h" >/dev/null; }
     done
+    # explicit/manual, so autoremove (apt) or orphan cleanup (pacman -Qdt) keeps them
     local pkg missing=()
-    for pkg in $(awk '!/^#/ && NF { print $1 }' "$REPO/deps.txt"); do
-        if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'ok installed'; then missing+=("$pkg")
-        elif apt-mark showauto "$pkg" | grep -qx "$pkg"; then say "manual  $pkg"; run apt-mark manual "$pkg" >/dev/null
+    for pkg in $(deps); do
+        if ! pkg_installed "$pkg"; then missing+=("$pkg")
+        elif ! pkg_explicit "$pkg"; then
+            say "explicit $pkg"
+            if [ "$DISTRO" = arch ]; then run pacman -D --asexplicit "$pkg" >/dev/null
+            else run apt-mark manual "$pkg" >/dev/null; fi
         fi
     done
-    [ ${#missing[@]} = 0 ] || echo "! missing packages: apt-get install ${missing[*]}"
+    [ ${#missing[@]} = 0 ] || echo "! missing packages (${missing[*]}): run install.sh --deps as your user"
+    if [ "$DISTRO" = arch ] && [ "$(readlink /etc/systemd/system/display-manager.service 2>/dev/null)" != /usr/lib/systemd/system/greetd.service ]; then
+        echo "! greetd is not the display manager yet: systemctl enable greetd.service (disable the current one first)"
+    fi
     [ "$changed" = 1 ] || { say "Root files already match the repo."; return; }
     run systemd-tmpfiles --create /etc/tmpfiles.d/polkit-fprint-skip.conf
     run systemctl daemon-reload
@@ -258,14 +322,13 @@ do_check() {
     [ "$(docker_patch_state)" = pending ] && bad "dockerManager patch not applied"
     [ "$(docker_patch_state)" = conflict ] && bad "dockerManager patch no longer applies"
 
-    say "Root files ($R):"
-    while IFS= read -r f; do
-        live=${f#"$R"}
+    say "Root files (root/ + root.$DISTRO/):"
+    while IFS=$'\t' read -r f live; do
         if [ ! -e "$live" ]; then bad "$live is not installed"
         elif [ ! -r "$live" ]; then say "  ? $live is not readable without root"
         elif ! cmp -s "$f" "$live"; then bad "$live differs from the repo (diff -u $live $f)"
         fi
-    done < <(find "$R" -type f | sort)
+    done < <(root_files)
     for d in "${DIVERSIONS[@]}"; do
         set -- $d
         dpkg-divert --list "$1" | grep -q . || bad "$1 is not diverted"
@@ -276,6 +339,7 @@ do_check() {
 case "$MODE" in
     user) do_user ;;
     root) do_root ;;
+    deps) do_deps ;;
     check) do_check ;;
     uninstall) do_uninstall ;;
 esac

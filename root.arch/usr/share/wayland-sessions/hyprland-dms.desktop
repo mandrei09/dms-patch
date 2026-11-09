@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=Hyprland (DMS)
+Comment=Hyprland with its output sent to the journal (dms-patch)
+Exec=/usr/local/bin/start-hyprland-quiet
+Type=Application
+DesktopNames=Hyprland
+Keywords=tiling;wayland;compositor;

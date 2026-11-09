@@ -30,9 +30,14 @@ import sys
 import time
 
 HOME = os.path.expanduser("~")
-CONFIG = os.path.join(HOME, ".config/danksearch/config.toml")
-STATE = os.path.join(HOME, ".config/danksearch/auto-excludes.json")
-INDEX = os.path.join(HOME, ".cache/danksearch/index")
+# Ubuntu's package is named danksearch and uses that name for its dirs; the
+# Arch package (dux-search-bin) is dsearch. Use whichever exists.
+def _pick(*cands):
+    return next((c for c in cands if os.path.exists(c)), cands[0])
+CONF_DIR = _pick(os.path.join(HOME, ".config/danksearch"), os.path.join(HOME, ".config/dsearch"))
+CONFIG = os.path.join(CONF_DIR, "config.toml")
+STATE = os.path.join(CONF_DIR, "auto-excludes.json")
+INDEX = os.path.join(_pick(os.path.join(HOME, ".cache/danksearch"), os.path.join(HOME, ".cache/dsearch")), "index")
 ROOTS = [os.path.join(HOME, d) for d in ("Work", "dotfiles", "dms-patch", "Documents", "Games")]
 REPO_DEPTH = 8  # deepest real repo today is 5 levels down; 8 leaves headroom
 MIN_FILES = 200

@@ -23,8 +23,9 @@ conf=/etc/greetd/dms-hyprland.conf
 [ -x "$bin" ] || { echo "cannot test: $bin is not executable"; exit 2; }
 [ -r "$launcher" ] || { echo "launcher missing: $launcher"; exit 1; }
 
-hypr_ver=$(dpkg-query -W -f='${Version}' hyprland 2>/dev/null)
-if [ -n "$hypr_ver" ] && dpkg --compare-versions "$hypr_ver" ge 0.57; then
+. "$(dirname "$(readlink -f "$0")")/../../../lib/pkg.sh"
+hypr_ver=$(pkg_ver hyprland /usr/bin/Hyprland)
+if [ -n "$hypr_ver" ] && ! ver_lt "$hypr_ver" 0.57; then
     echo "OK: Hyprland $hypr_ver -- the launcher hands off to dms-greeter, nothing replicated"
     exit 0
 fi

@@ -40,15 +40,24 @@ done
 #    is one 512-byte block, and apport still runs (tested 2026-11-07).
 prlimit --pid $$ --core=1 2>/dev/null
 
-want="$(dpkg-query -W -f='${Version}' dms 2>/dev/null) $(dpkg-query -W -f='${Version}' dms-greeter 2>/dev/null)"
+# Package version on Debian (by name) or Arch (owner of the file; the Arch
+# names differ). Inline on purpose: the login screen must not depend on the
+# dms-patch checkout. Same as lib/pkg.sh there.
+pkg_ver() {
+    _v=$(dpkg-query -W -f='${Version}' "$1" 2>/dev/null) && [ -n "$_v" ] && { echo "$_v"; return; }
+    command -v pacman >/dev/null 2>&1 && pacman -Qo "$2" 2>/dev/null | awk '{print $NF}'
+}
+
+want="$(pkg_ver dms /usr/bin/dms) $(pkg_ver dms-greeter /usr/bin/dms-greeter)"
 patched=0
 [ -f "$UI/shell.qml" ] && [ "$(cat "$UI/.built-for" 2>/dev/null)" = "$want" ] && patched=1
 
 gen_dir=${XDG_RUNTIME_DIR:-}
 [ -n "$gen_dir" ] && [ -d "$gen_dir" ] && [ -w "$gen_dir" ] || gen_dir=$(mktemp -d)
 
-hypr_ver=$(dpkg-query -W -f='${Version}' hyprland 2>/dev/null)
-if [ -n "$hypr_ver" ] && dpkg --compare-versions "$hypr_ver" lt 0.57; then
+hypr_ver=$(pkg_ver hyprland /usr/bin/Hyprland)
+if [ -n "$hypr_ver" ] && if command -v dpkg >/dev/null 2>&1; then dpkg --compare-versions "$hypr_ver" lt 0.57
+                         else [ "$(vercmp "$hypr_ver" 0.57)" -lt 0 ]; fi; then
     # ── own hyprlang path ───────────────────────────────────────────────
     conf=/etc/greetd/dms-hyprland.conf
     prev=""

@@ -1,10 +1,13 @@
-# Any apt/dpkg operation (install, upgrade, autoremove) rewrites
-# /var/lib/dpkg/status -- re-check the local DMS customisations afterwards.
+# Any package operation rewrites the package database -- /var/lib/dpkg/status
+# (apt) or /var/lib/pacman/local (pacman) -- so re-check the local DMS
+# customisations afterwards. A path that doesn't exist on this distro is
+# simply never triggered.
 [Unit]
 Description=Re-check local DMS customisations after package changes
 
 [Path]
 PathChanged=/var/lib/dpkg/status
+PathChanged=/var/lib/pacman/local
 Unit=dms-update-guard.service
 
 [Install]

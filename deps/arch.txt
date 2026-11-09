@@ -1,0 +1,44 @@
+# Arch packages the DMS customisations need.
+#   <package>        official repos (pacman)
+#   <package> aur    from the AUR (install.sh --deps uses paru or yay)
+# Read by install.sh (--deps installs, --root marks them explicit) and
+# dms-update-check. No holds on Arch: dms-update-check dry-runs every patch
+# after each pacman transaction instead.
+dux-shell
+dux-gop
+quickshell
+hyprland
+greetd
+dux-greeter-bin aur
+dux-search-bin aur
+fprintd
+polkit
+patch
+python
+python-cairo
+python-pygments
+grim
+slurp
+wl-clipboard
+satty
+tesseract
+tesseract-data-eng
+tesseract-data-ron
+jq
+rsync
+poppler
+glib2
+gtk3
+file
+libnotify
+file-roller
+fd
+ripgrep
+tmux
+zenity
+playerctl
+brightnessctl
+cliphist
+pipewire
+wireplumber
+openssh
