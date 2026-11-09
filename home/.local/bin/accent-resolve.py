@@ -69,7 +69,7 @@ def dms_palettes():
     try:
         settings = json.loads(DMS_SETTINGS.read_text())
         if settings.get("currentThemeName") == "custom" and settings.get("customThemeFile"):
-            theme = json.loads(Path(settings["customThemeFile"]).read_text())
+            theme = json.loads(Path(settings["customThemeFile"]).expanduser().read_text())
             for mode in ("dark", "light"):
                 for k, v in (theme.get(mode) or {}).items():
                     if k in CUSTOM_KEYS and mode in pals:

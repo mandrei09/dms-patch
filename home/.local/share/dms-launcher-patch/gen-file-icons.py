@@ -92,7 +92,9 @@ def main():
 
     # Store file names, not ids, so the JS needs no second table.
     js = {
-        'dir': OUT_DIR,
+        # dms-launcher-patch puts the real icon dir in at install time, so
+        # the generated file carries no per-user path.
+        'dir': '@FILE_ICONS_DIR@',
         'file': files.get(d['file'], ''),
         'folder': files.get(d['folder'], ''),
         'names': {k: files[v] for k, v in names.items()},

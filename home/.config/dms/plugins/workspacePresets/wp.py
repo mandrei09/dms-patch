@@ -70,6 +70,8 @@ def matches(app, c):
 
 
 def spawn(cmd):
+    # $HOME / ~ in presets, so workspace-presets.json has no per-user paths
+    cmd = [os.path.expanduser(os.path.expandvars(a)) for a in cmd]
     subprocess.Popen(["systemd-run", "--user", "--scope", "--collect", "--quiet", "--", *cmd],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, start_new_session=True)

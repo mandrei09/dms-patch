@@ -116,10 +116,14 @@ fi
 ICONS="$BASE/FileIcons.js"
 ICONS_SRC="${DMS_ICONS_SRC:-$HOME/.local/share/dms-launcher-patch/FileIcons.js}"
 if [ -f "$ICONS_SRC" ]; then
-    if cmp -s "$ICONS_SRC" "$ICONS" 2>/dev/null; then
+    # The generated file has @FILE_ICONS_DIR@ instead of an absolute path.
+    icons_tmp=$(mktemp)
+    sed "s|@FILE_ICONS_DIR@|$(dirname "$ICONS_SRC")/file-icons|" "$ICONS_SRC" > "$icons_tmp"
+    if cmp -s "$icons_tmp" "$ICONS" 2>/dev/null; then
+        rm -f "$icons_tmp"
         echo "FileIcons.js:                 unchanged"
     else
-        cat "$ICONS_SRC" > "$ICONS"
+        cat "$icons_tmp" > "$ICONS"; rm -f "$icons_tmp"
         pane_changed=1
         echo "FileIcons.js:                 installed"
     fi
