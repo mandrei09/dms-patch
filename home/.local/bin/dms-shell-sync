@@ -61,7 +61,7 @@ trap 'rm -rf -- "$TRY" "$DST.old"' EXIT
 # Patch scripts exit 10 when already applied, which cannot happen on a freshly
 # mirrored tree -- treat anything but 0 as a real failure. A failed patch is
 # not fatal: a stock shell beats no shell, so log and carry on.
-for patch in dms-tray-patch dms-launcher-patch dms-procs-patch dms-workspace-dedup-patch dms-notif-icon-patch dms-lock-notif-filter-patch dms-hyprconf-input-patch; do
+for patch in dms-tray-patch dms-launcher-patch dms-procs-patch dms-workspace-dedup-patch dms-notif-icon-patch dms-lock-notif-filter-patch dms-hyprconf-input-patch dms-polkit-fprint-skip-patch; do
     if ! command -v "$patch" >/dev/null 2>&1; then
         echo "dms-shell-sync: $patch not found, skipping" >&2
         continue

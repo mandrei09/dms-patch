@@ -1,0 +1,129 @@
+#!/usr/bin/env python3
+"""Let the keyboard take over from the fingerprint reader in DMS polkit prompts.
+
+Stock: /etc/pam.d/polkit-1 runs pam_fprintd first (3 tries x 10 s). A password
+typed meanwhile is queued until that step ends, so with the reader out of
+reach (lid closed, docked) every pkexec waits ~30 s.
+
+Patched: the first keystroke while the fingerprint step is running touches
+/run/polkit-fprint-skip/<uid>. The root unit polkit-fprint-skip.path then stops
+the helper stuck in pam_fprintd, Quickshell starts a new PAM session, and the
+pam_exec check at the top of polkit-1 skips pam_fprintd, so the password prompt
+appears at once (and a password already submitted with Enter goes straight in).
+The killed session is reported as a failure; PolkitService swallows that one
+so the field doesn't turn red. The flag is removed when the dialog goes away.
+Root side + README: ~/Documents/polkit-fprint-skip/.
+
+Usage: dms-polkit-fprint-skip-patch [shell-dir]  (default: ~/.local/share/dms-shell)
+Idempotent: exit 10 means it was already in place.
+"""
+
+import os
+import sys
+
+SHELL_DIR = (sys.argv[1] if len(sys.argv) > 1
+             else os.path.expanduser("~/.local/share/dms-shell"))
+MARKER = "dms-polkit-fprint-skip-patch"
+
+EDITS = {
+    "Services/PolkitService.qml": [
+        ('''    property bool _switchingIdentity: false
+''', '''    property bool _switchingIdentity: false
+    // Local patch (dms-polkit-fprint-skip-patch): set while the dialog has asked
+    // for the fingerprint step to be cut short; that session ends as a "failure".
+    property bool fprintSkipPending: false
+'''),
+        ('''            if (root._switchingIdentity)
+                return;
+            root.authFailed = true;''', '''            if (root._switchingIdentity || root.fprintSkipPending)
+                return;
+            root.authFailed = true;'''),
+    ],
+    "Modals/PolkitAuthContent.qml": [
+        ('''import QtQuick
+import Quickshell.Io
+''', '''import QtQuick
+import Quickshell
+import Quickshell.Io
+'''),
+        ('''    property bool awaitingFprintForPassword: false
+''', '''    property bool awaitingFprintForPassword: false
+    // Local patch (dms-polkit-fprint-skip-patch): typing during the fingerprint
+    // step ends it; see ~/Documents/polkit-fprint-skip/README.
+    property bool fprintSkipRequested: false
+    readonly property string fprintSkipFlag: "/run/polkit-fprint-skip/" + UserInfoService.uid
+
+    function requestFprintSkip() {
+        if (fprintSkipRequested || !currentFlow || currentFlow.isResponseRequired || !polkitPamHasFprint || passwordInput === "" || UserInfoService.uid < 0)
+            return;
+        fprintSkipRequested = true;
+        PolkitService.fprintSkipPending = true;
+        Quickshell.execDetached(["touch", fprintSkipFlag]);
+    }
+
+    function clearFprintSkip() {
+        PolkitService.fprintSkipPending = false;
+        if (!fprintSkipRequested)
+            return;
+        fprintSkipRequested = false;
+        Quickshell.execDetached(["rm", "-f", fprintSkipFlag]);
+    }
+
+    Component.onDestruction: clearFprintSkip()
+'''),
+        ('''        awaitingFprintForPassword = false;
+    }
+
+    function _commitSubmit() {''', '''        awaitingFprintForPassword = false;
+        clearFprintSkip();
+    }
+
+    function _commitSubmit() {'''),
+        ('''            if (!root.currentFlow.isResponseRequired)
+                return;
+            if (root.awaitingFprintForPassword''', '''            if (!root.currentFlow.isResponseRequired)
+                return;
+            PolkitService.fprintSkipPending = false;
+            if (root.awaitingFprintForPassword'''),
+        ('''        function onAuthenticationSucceeded() {
+            root.authenticationSucceeded();''', '''        function onAuthenticationSucceeded() {
+            root.clearFprintSkip();
+            root.authenticationSucceeded();'''),
+        ('''        visible: text !== ""
+    }''', '''        // the killed fingerprint session leaves "Place your finger..." behind
+        visible: text !== "" && !(root.fprintSkipRequested && !(root.currentFlow?.supplementaryIsError ?? false))
+    }'''),
+        ('''        onTextEdited: root.passwordInput = text
+''', '''        onTextEdited: {
+            root.passwordInput = text;
+            root.requestFprintSkip();
+        }
+'''),
+    ],
+}
+
+
+def main():
+    srcs = {}
+    for rel, edits in EDITS.items():
+        path = os.path.join(SHELL_DIR, rel)
+        with open(path) as f:
+            src = f.read()
+        if MARKER in src:
+            return 10
+        for old, new in edits:
+            if src.count(old) != 1:
+                print(f"{MARKER}: anchor not found in {path} (DMS changed upstream?):\n{old}",
+                      file=sys.stderr)
+                return 1
+            src = src.replace(old, new)
+        srcs[path] = src
+    for path, src in srcs.items():
+        with open(path, "w") as f:
+            f.write(src)
+        print(f"{MARKER}: patched {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
