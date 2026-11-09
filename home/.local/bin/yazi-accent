@@ -11,7 +11,7 @@ set -euo pipefail
 SYNC="$HOME/.local/bin/accent-resolve.py"
 hex=$(/usr/bin/python3 "$SYNC" --print | tr -d '#[:space:]')
 
-read -r ink dim <<EOF
+read -r ink dim txt edge <<EOF
 $(/usr/bin/python3 - "$hex" <<'PY'
 import sys
 h = sys.argv[1]
@@ -24,12 +24,26 @@ ink = 'FFFFFF' if (1.05 / (L + 0.05)) >= ((L + 0.05) / (0.0262 + 0.05)) else '1F
 # 0.70 toward the terminal background #1F1F1F: secondary / inactive chips.
 mix = lambda c, t, w: round(c * (1 - w) + t * w)
 dim = '%02X%02X%02X' % tuple(mix(c, 0x1F, 0.70) for c in (r, g, b))
-print(ink, dim)
+# Accent used as *text* on the #1F1F1F background: same hue, lightness
+# raised until it clears WCAG 4.5:1, so a dark accent stays readable.
+import colorsys
+lum = lambda rgb: sum(w * lin(c) for w, c in zip((0.2126, 0.7152, 0.0722), rgb))
+con = lambda rgb: (lum(rgb) + 0.05) / (0.0137 + 0.05)
+hh, ll, ss = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
+ss = max(ss, 0.35) if ss > 0.05 else ss
+t = (r, g, b)
+while con(t) < 4.5 and ll < 1:
+    ll = min(1, ll + 0.01)
+    t = tuple(round(c * 255) for c in colorsys.hls_to_rgb(hh, ll, ss))
+txt = '%02X%02X%02X' % t
+# Borders: the text accent pulled halfway to the background -- visible but quiet.
+edge = '%02X%02X%02X' % tuple(mix(c, 0x1F, 0.50) for c in t)
+print(ink, dim, txt, edge)
 PY
 )
 EOF
 
-a="#$hex" k="#$ink" d="#$dim"
+a="#$hex" k="#$ink" d="#$dim" t="#$txt" e="#$edge"
 install -d "$HOME/.config/yazi"
 
 cat > "$HOME/.config/yazi/theme.toml" <<EOF
@@ -37,56 +51,56 @@ cat > "$HOME/.config/yazi/theme.toml" <<EOF
 # Only accent-related keys; everything else falls through to Yazi's preset.
 
 [mgr]
-cwd           = { fg = "$a" }
-find_position = { fg = "$a", bg = "reset", bold = true, italic = true }
-border_style  = { fg = "$d" }
+cwd           = { fg = "$t" }
+find_position = { fg = "$t", bg = "reset", bold = true, italic = true }
+border_style  = { fg = "$e" }
 # Code previews use the same Dark Modern palette as nvim.
 syntect_theme = "~/.config/yazi/dark-modern.tmTheme"
 
 [tabs]
 active   = { fg = "$k", bg = "$a", bold = true }
-inactive = { fg = "$a", bg = "$d" }
+inactive = { fg = "$t", bg = "$d" }
 
 [mode]
 normal_main = { fg = "$k", bg = "$a", bold = true }
-normal_alt  = { fg = "$a", bg = "$d" }
+normal_alt  = { fg = "$t", bg = "$d" }
 
 [indicator]
-parent  = { fg = "$a", bg = "$d" }
+parent  = { fg = "$t", bg = "$d" }
 current = { fg = "$k", bg = "$a", bold = true }
 preview = { underline = true }
 
 [which]
-border = { fg = "$a" }
-desc   = { fg = "$a" }
+border = { fg = "$t" }
+desc   = { fg = "$t" }
 
 [confirm]
-border = { fg = "$a" }
-title  = { fg = "$a" }
+border = { fg = "$t" }
+title  = { fg = "$t" }
 
 [spot]
-border  = { fg = "$a" }
-title   = { fg = "$a" }
-tbl_col = { fg = "$a" }
+border  = { fg = "$t" }
+title   = { fg = "$t" }
+tbl_col = { fg = "$t" }
 
 [pick]
-border = { fg = "$a" }
-active = { fg = "$a", bold = true }
+border = { fg = "$t" }
+active = { fg = "$t", bold = true }
 
 [input]
-border = { fg = "$a" }
+border = { fg = "$t" }
 
 [cmp]
-border = { fg = "$a" }
+border = { fg = "$t" }
 active = { fg = "$k", bg = "$a" }
 
 [tasks]
-border  = { fg = "$a" }
-hovered = { fg = "$a", bold = true }
+border  = { fg = "$t" }
+hovered = { fg = "$t", bold = true }
 
 [help]
-border  = { fg = "$a" }
-chord   = { fg = "$a" }
+border  = { fg = "$t" }
+chord   = { fg = "$t" }
 hovered = { fg = "$k", bg = "$a", bold = true }
 
 [filetype]
@@ -101,8 +115,8 @@ rules = [
 	{ url = "*", is = "exec", fg = "green" },
 	{ url = "*", is = "dummy", bg = "red" },
 	{ url = "*/", is = "dummy", bg = "red" },
-	{ url = "*/", fg = "$a", bold = true },
+	{ url = "*/", fg = "$t", bold = true },
 ]
 EOF
 
-echo "yazi accent #$hex  ink #$ink  dim #$dim"
+echo "yazi accent #$hex  ink #$ink  dim #$dim  text #$txt  edge #$edge"
