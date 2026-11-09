@@ -12,7 +12,7 @@ pam_exec check at the top of polkit-1 skips pam_fprintd, so the password prompt
 appears at once (and a password already submitted with Enter goes straight in).
 The killed session is reported as a failure; PolkitService swallows that one
 so the field doesn't turn red. The flag is removed when the dialog goes away.
-Root side + README: ~/Documents/polkit-fprint-skip/.
+Root side: root/ in this repo, docs/polkit-fprint-skip.md.
 
 Usage: dms-polkit-fprint-skip-patch [shell-dir]  (default: ~/.local/share/dms-shell)
 Idempotent: exit 10 means it was already in place.
@@ -49,7 +49,7 @@ import Quickshell.Io
         ('''    property bool awaitingFprintForPassword: false
 ''', '''    property bool awaitingFprintForPassword: false
     // Local patch (dms-polkit-fprint-skip-patch): typing during the fingerprint
-    // step ends it; see ~/Documents/polkit-fprint-skip/README.
+    // step ends it; see dms-patch docs/polkit-fprint-skip.md.
     property bool fprintSkipRequested: false
     readonly property string fprintSkipFlag: "/run/polkit-fprint-skip/" + UserInfoService.uid
 

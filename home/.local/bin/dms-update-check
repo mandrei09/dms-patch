@@ -23,6 +23,9 @@ HOME_DIR="$HOME"
 OUT_DIR="$HOME_DIR/.cache/dms-update-guard"
 REPORT="$OUT_DIR/report.txt"
 mkdir -p "$OUT_DIR"
+# The dms-patch checkout this script is linked from (deps.txt, root/, install.sh).
+REPO=$(cd "$(dirname "$(readlink -f "$0")")/../../.." && pwd)
+DEPS="$REPO/deps.txt"
 
 problems=()
 add() { problems+=("$*"); }
@@ -40,7 +43,7 @@ if command -v dms-upgrade >/dev/null 2>&1; then
     fi
 fi
 held=$(apt-mark showhold 2>/dev/null)
-for p in dms dms-greeter quickshell danksearch dgop; do
+for p in $(awk '$2 == "hold" { print $1 }' "$DEPS"); do
     dpkg-query -W "$p" >/dev/null 2>&1 || continue
     printf '%s\n' "$held" | grep -qx "$p" \
         || add "$p is not on hold, so apt upgrade can update it untested (fix: pkexec apt-mark hold $p)"
@@ -56,13 +59,13 @@ fi
 # ── 0c. login screen's compositor launcher ──────────────────────────────
 # /usr/local/bin/dms-greeter-launch starts the greeter's Hyprland itself while
 # Hyprland < 0.57 (dms-greeter 2.1 writes Lua configs 0.53 can't read: black
-# login screen, 2026-11-08). The installed copy must match the dotfiles copy,
+# login screen, 2026-11-08). The installed copy must match the dms-patch copy,
 # and must still match how the installed dms-greeter starts its UI. The second
 # test runs the binary, so it is cached per (binary, launcher, Hyprland) state.
 LAUNCHER=/usr/local/bin/dms-greeter-launch
-LAUNCHER_SRC="$HOME_DIR/dotfiles/.system/usr/local/bin/dms-greeter-launch"
+LAUNCHER_SRC="$REPO/root/usr/local/bin/dms-greeter-launch"
 if [ -f "$LAUNCHER_SRC" ] && ! cmp -s "$LAUNCHER_SRC" "$LAUNCHER"; then
-    add "dms-greeter-launch differs from the dotfiles copy (install: sudo install -m755 $LAUNCHER_SRC /usr/local/bin/)"
+    add "dms-greeter-launch differs from the dms-patch copy (install: $REPO/install.sh --root)"
 fi
 if [ -x /usr/bin/dms-greeter ] && command -v dms-greeter-launch-check >/dev/null 2>&1; then
     key=$(stat -c '%n %Y %s' /usr/bin/dms-greeter "$LAUNCHER" 2>/dev/null; dpkg-query -W -f='${Version}' hyprland 2>/dev/null)
@@ -149,10 +152,7 @@ done
 
 # ── 4. commands and packages the local tooling needs ────────────────────
 # Must be installed AND marked manual, so `apt autoremove` can't take them.
-REQUIRED_PKGS=(grim slurp wl-clipboard tesseract-ocr tesseract-ocr-eng tesseract-ocr-ron
-    python3-cairo jq rsync poppler-utils libglib2.0-bin libgtk-3-bin file
-    libnotify-bin file-roller fd-find tmux zenity playerctl brightnessctl cliphist
-    pipewire-bin wireplumber openssh-client danksearch)
+mapfile -t REQUIRED_PKGS < <(awk '!/^#/ && NF && $2 != "hold" { print $1 }' "$DEPS"; echo danksearch)
 for p in "${REQUIRED_PKGS[@]}"; do
     if ! dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -qE '^(install|hold) ok installed'; then
         add "package missing: $p (reinstall: pkexec apt-get install $p)"
@@ -163,6 +163,11 @@ done
 for c in "$HOME_DIR/.local/bin/satty" /home/linuxbrew/.linuxbrew/bin/rg; do
     [ -x "$c" ] || add "missing non-apt tool: $c"
 done
+
+# ── 4b. dms-patch links and root files match the repo ──────────────────
+if ! "$REPO/install.sh" --check --quiet >"$OUT_DIR/install-check.log" 2>&1; then
+    add "dms-patch drift: $(grep -c '✗' "$OUT_DIR/install-check.log") item(s), see $OUT_DIR/install-check.log (fix: $REPO/install.sh [--root])"
+fi
 
 # ── 5. hardcoded paths into DMS's own tree must still exist ────────────
 # Our files should not reach into /usr/share/quickshell/dms at all; any that

@@ -33,7 +33,7 @@ HOME = os.path.expanduser("~")
 CONFIG = os.path.join(HOME, ".config/danksearch/config.toml")
 STATE = os.path.join(HOME, ".config/danksearch/auto-excludes.json")
 INDEX = os.path.join(HOME, ".cache/danksearch/index")
-ROOTS = [os.path.join(HOME, d) for d in ("Work", "dotfiles", "Documents", "Games")]
+ROOTS = [os.path.join(HOME, d) for d in ("Work", "dotfiles", "dms-patch", "Documents", "Games")]
 REPO_DEPTH = 8  # deepest real repo today is 5 levels down; 8 leaves headroom
 MIN_FILES = 200
 

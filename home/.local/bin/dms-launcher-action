@@ -348,7 +348,7 @@ def uninstall_plan(did):
             if rel[:len(pp)] == pp and len(rel) > len(pp) + 1:
                 target = os.path.join(HOME, *rel[:len(pp) + 1])
                 break
-        if "/dotfiles/" in os.path.realpath(prog) or target in (HOME, HOME + "/"):
+        if any(d in os.path.realpath(prog) for d in ("/dotfiles/", "/dms-patch/")) or target in (HOME, HOME + "/"):
             target = None
         if target:
             steps.insert(0, remove_file_step(target))

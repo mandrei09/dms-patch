@@ -12,7 +12,7 @@
 #      dms-greeter-launch-check (does the login screen's own compositor
 #      launcher still match how the new dms-greeter starts its UI);
 #   4. prints that report, then installs exactly those debs with one pkexec
-#      (~/Documents/dms-upgrade-root.sh unholds, installs, re-holds; apt's
+#      (dms-upgrade-root unholds, installs, re-holds; apt's
 #      Post-Invoke hook rebuilds the patched greeter UI);
 #   5. restarts DMS (which re-applies the patches for real) and reports what
 #      actually came up.
@@ -30,7 +30,7 @@ set -uo pipefail
 
 PKGS=(dms dms-greeter quickshell danksearch dgop)
 CACHE=$HOME/.cache/dms-upgrade
-ROOT_HELPER=$HOME/Documents/dms-upgrade-root.sh
+ROOT_HELPER=$HOME/.local/bin/dms-upgrade-root
 GREETER_PATCH=/usr/local/lib/dms-greeter-auth/dms-greeter-auth-patch
 
 CHECK=0 RESTART=1 RECHECK=0 TESTCUR=0
@@ -163,11 +163,11 @@ debs=("$DIR"/debs/*.deb)
 [ -e "${debs[0]}" ] || { echo "dms-upgrade: no staged debs, rerun with --recheck" >&2; exit 1; }
 echo
 echo "Installing (one password prompt)..."
-if ! pkexec "$ROOT_HELPER" "${debs[@]}"; then
-    echo "dms-upgrade: install failed, see ~/Documents/dms-upgrade-root.log" >&2
+if ! pkexec "$ROOT_HELPER" "${debs[@]}" >"$CACHE/root.log" 2>&1; then
+    echo "dms-upgrade: install failed, see $CACHE/root.log" >&2
     exit 1
 fi
-tail -n 4 "$HOME/Documents/dms-upgrade-root.log"
+tail -n 4 "$CACHE/root.log"
 # Installed now; the debs and unpacked packages are dead weight. The extracted
 # UI trees stay (small) in case a failing patch still needs porting.
 rm -rf -- "$DIR/debs" "$DIR/staged"

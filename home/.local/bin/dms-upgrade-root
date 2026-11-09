@@ -1,0 +1,24 @@
+#!/bin/sh
+# Root half of dms-upgrade: pkexec dms-upgrade-root <deb>...
+# Unholds the packages in the given debs, installs exactly those debs, and
+# puts the holds back (apt's DPkg::Post-Invoke hook then rebuilds the patched
+# greeter UI). Only accepts .deb files from the caller's dms-upgrade cache.
+set -eu
+[ "$(id -u)" = 0 ] || { echo "run with pkexec" >&2; exit 1; }
+[ $# -gt 0 ] || { echo "usage: dms-upgrade-root <deb>..." >&2; exit 2; }
+user_home=$(getent passwd "${PKEXEC_UID:-0}" | cut -d: -f6)
+pkgs=
+for d in "$@"; do
+    case $(readlink -f "$d") in
+        "$user_home"/.cache/dms-upgrade/*/debs/*.deb) ;;
+        *) echo "refusing $d: not a staged dms-upgrade deb" >&2; exit 2 ;;
+    esac
+    pkgs="$pkgs $(dpkg-deb -f "$d" Package)"
+done
+echo "$(date '+%F %T') installing:$pkgs"
+apt-mark unhold $pkgs
+rc=0
+DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-downgrades "$@" || rc=$?
+apt-mark hold $pkgs
+echo "$(date '+%F %T') done (rc=$rc)"
+exit $rc
