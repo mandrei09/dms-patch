@@ -1,0 +1,2 @@
+// rebuild the patched DMS greeter UI after dms/dms-greeter updates (github.com/mandrei09/dms-patch)
+DPkg::Post-Invoke { "[ -x /usr/local/sbin/dms-greeter-ui-rebuild ] && /usr/local/sbin/dms-greeter-ui-rebuild || true"; };

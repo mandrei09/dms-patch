@@ -1,7 +1,7 @@
 #!/bin/sh
 # greetd's default_session command (see /etc/greetd/config.toml); runs as the
-# `greeter` user. Source: ~/dotfiles/.system/usr/local/bin/dms-greeter-launch
-# (install: sudo install -m755 <that file> /usr/local/bin/).
+# `greeter` user. Source: root/usr/local/bin/dms-greeter-launch in
+# github.com/mandrei09/dms-patch (install: install.sh --root).
 #
 # 1. Login screen only on the external display when one is connected (same
 #    rule as the desktop's hypr-monitor-watch): the -C compositor config is

@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""DMS login screen: fingerprint and password without waiting on each other.
+
+Why the stock greeter is slow with a password
+---------------------------------------------
+greetd authenticates through ONE sequential PAM stack (/etc/pam.d/greetd):
+pam_fprintd, then pam_unix. While pam_fprintd waits for a finger, greetd is
+blocked inside that request (context.rs holds its lock across the worker
+round-trip), so NOTHING the greeter sends -- not even cancel_session -- is
+handled until the fingerprint window ends. A cancel-and-restart approach
+(v1 of this patch, 2026-11-05) therefore queued up and fired a dozen sessions
+at once when the window closed. The only moment greetd listens is when PAM is
+at the pam_unix password prompt.
+
+Design (v2)
+-----------
+* Short fingerprint windows (pam_fprintd timeout=3 in /etc/pam.d/greetd),
+  re-armed back to back while the password field is empty: after each window
+  PAM reaches the password prompt, the greeter cancels (greetd is idle there,
+  so it is instant) and starts a new fingerprint window ~450 ms later. The
+  300 ms of that after the cancel are required: Quickshell's Greetd goes
+  Inactive before greetd's reply to cancel_session arrives, and a
+  create_session sent sooner reads that "success" as its own result.
+* Once you type, re-arming stops: the session parks at the password prompt and
+  Enter answers it immediately. If you press Enter inside a window, the wait is
+  at most what is left of those 3 s (normally already spent while typing).
+* Stock auto-submitted a half-typed password when a window ended; removed.
+* A password attempt that needs a NEW session (e.g. after a wrong password)
+  touches $DMS_GREET_CFG_DIR/.local/state/skip-fprint first; pam_exec
+  (/usr/local/libexec/greetd-skip-fprint) consumes it and PAM goes straight to
+  pam_unix. A forged flag can only make PAM ask for the password.
+* Fingerprint re-arms 4 s after a wrong password (a retype within that goes
+  straight to pam_unix via the flag), backs off if fprintd fails
+  instantly (5 fast failures = give up), and sleeps after ~6 min with no typing
+  (Enter on an empty field wakes it) to keep the journal quiet.
+
+v3 (2026-11-08, DMS 2.1.1)
+--------------------------
+* The greeter UI is no longer in /usr/share/quickshell/dms; it is embedded in
+  /usr/bin/dms-greeter. dms-greeter-ui-rebuild extracts it from there.
+* Auth state moved to GreeterState (passwordSubmitRequested,
+  pendingPasswordResponse), the password field moved to GreeterAuthWidget.qml,
+  and authTimeout/externalAuthTimeoutMs are gone. Same design, new anchors.
+* The fixed-height status line edit (2026-11-07) is dropped: the status text
+  is now inside GreeterAuthWidget and the clock is a separate widget, so it
+  no longer moves the clock.
+
+Usage: dms-greeter-auth-patch <shell-dir>   (exit 10 = already applied)
+"""
+
+import os
+import sys
+
+if len(sys.argv) != 2:
+    sys.exit(__doc__)
+SHELL_DIR = sys.argv[1]
+MARKER = "dms-greeter-auth-patch"
+
+CONTENT = "Modules/Greetd/GreeterContent.qml"
+AUTHWIDGET = "Modules/Greetd/GreeterAuthWidget.qml"
+
+EDITS = {
+    CONTENT: [
+        # 1. state + helpers
+        ('    property string externalAuthAutoStartedForUser: ""\n',
+         """    property string externalAuthAutoStartedForUser: ""
+    // dms-greeter-auth-patch v3
+    property var afterSkipFprintFlag: null
+    property bool rearmFprintAfterCancel: false
+    property real fprintWindowStartedAt: 0
+    property int fprintFastFailures: 0
+    property int fprintIdleRearms: 0
+    readonly property int fprintMaxIdleRearms: 120
+    readonly property string skipFprintFlagPath: (Quickshell.env("DMS_GREET_CFG_DIR") || "/var/cache/dms-greeter") + "/.local/state/skip-fprint"
+    function withSkipFprint(callback) {
+        afterSkipFprintFlag = callback;
+        skipFprintFlagProcess.running = true;
+    }
+    function fprintRearmWanted() {
+        return root.greeterExternalAuthAvailable && GreeterState.showPasswordInput && !!GreeterState.username
+            && !GreeterState.unlocking && !GreeterState.passwordSubmitRequested
+            && !(GreeterState.passwordBuffer && GreeterState.passwordBuffer.length > 0)
+            && fprintFastFailures < 5 && fprintIdleRearms < fprintMaxIdleRearms;
+    }
+    function scheduleFprintRearm(delayMs) {
+        fprintRearmTimer.interval = delayMs;
+        fprintRearmTimer.restart();
+    }
+"""),
+
+        # 2. Enter on an empty field while parked at the password prompt = wake
+        #    the fingerprint instead of submitting an empty password
+        ("""        const hasPasswordBuffer = GreeterState.passwordBuffer && GreeterState.passwordBuffer.length > 0;
+        if (Greetd.state !== GreetdState.Inactive) {
+            if (GreeterState.pendingPasswordResponse && submitPassword)""",
+         """        const hasPasswordBuffer = GreeterState.passwordBuffer && GreeterState.passwordBuffer.length > 0;
+        if (submitPassword && !hasPasswordBuffer && root.greeterExternalAuthAvailable) { // dms-greeter-auth-patch
+            fprintIdleRearms = 0;
+            fprintFastFailures = 0;
+            GreeterState.passwordSubmitRequested = false;
+            scheduleFprintRearm(0);
+            return;
+        }
+        if (Greetd.state !== GreetdState.Inactive) {
+            if (GreeterState.pendingPasswordResponse && submitPassword)"""),
+
+        # 3. new session: remember when a fingerprint window starts; password
+        #    sessions skip pam_fprintd
+        ("""        GreeterState.awaitingExternalAuth = !submitPassword && !hasPasswordBuffer && root.greeterExternalAuthAvailable;
+        Greetd.createSession(GreeterState.username);
+    }""",
+         """        GreeterState.awaitingExternalAuth = !submitPassword && !hasPasswordBuffer && root.greeterExternalAuthAvailable;
+        // dms-greeter-auth-patch: password sessions skip pam_fprintd
+        const sessionUser = GreeterState.username;
+        if (submitPassword && root.greeterPamHasExternalAuth) {
+            withSkipFprint(() => Greetd.createSession(sessionUser));
+        } else {
+            fprintWindowStartedAt = Date.now();
+            Greetd.createSession(sessionUser);
+        }
+    }"""),
+
+        # 4. at the password prompt: never auto-submit a half-typed password, and
+        #    re-arm the fingerprint while the field is empty
+        ("""                const hasPasswordBuffer = GreeterState.passwordBuffer && GreeterState.passwordBuffer.length > 0;
+                if (!GreeterState.passwordSubmitRequested && hasPasswordBuffer)
+                    GreeterState.passwordSubmitRequested = true;
+                if (GreeterState.passwordSubmitRequested && !root.submitBufferedPassword())""",
+         """                const hasPasswordBuffer = GreeterState.passwordBuffer && GreeterState.passwordBuffer.length > 0;
+                // dms-greeter-auth-patch: stock set passwordSubmitRequested here,
+                // sending whatever was typed when the fingerprint window ended.
+                if (!GreeterState.passwordSubmitRequested && !hasPasswordBuffer && fprintWindowStartedAt > 0) {
+                    const windowMs = Date.now() - fprintWindowStartedAt;
+                    fprintWindowStartedAt = 0;
+                    fprintFastFailures = windowMs < 1500 ? fprintFastFailures + 1 : 0;
+                    fprintIdleRearms = fprintIdleRearms + 1;
+                    root.scheduleFprintRearm(fprintFastFailures > 0 ? 3000 : 150);
+                }
+                if (GreeterState.passwordSubmitRequested && !root.submitBufferedPassword())"""),
+
+        # 5. wrong password -> fingerprint again after 4 s (unless typing)
+        ("""            GreeterState.authFeedbackMessage = currentAuthMessage();
+            GreeterState.passwordBuffer = "";
+            root.clearInput();
+            placeholderDelay.restart();
+            Greetd.cancelSession();
+        }
+
+        function onError(error) {""",
+         """            GreeterState.authFeedbackMessage = currentAuthMessage();
+            GreeterState.passwordBuffer = "";
+            root.clearInput();
+            placeholderDelay.restart();
+            fprintIdleRearms = 0; // dms-greeter-auth-patch
+            root.scheduleFprintRearm(4000); // a quick retype skips the fingerprint entirely
+            Greetd.cancelSession();
+        }
+
+        function onError(error) {"""),
+
+        # 6. after our own cancel: start the next fingerprint window
+        ("""                GreeterState.authPromptText = "";
+                GreeterState.passwordSubmitRequested = false;
+            }
+        }
+
+        function onReadyToLaunch() {""",
+         """                GreeterState.authPromptText = "";
+                GreeterState.passwordSubmitRequested = false;
+                if (rearmFprintAfterCancel) { // dms-greeter-auth-patch
+                    // Quickshell flips to Inactive before greetd's reply to
+                    // cancel_session arrives; a create_session sent now would
+                    // read that "success" as its own result. Let it land first.
+                    rearmFprintAfterCancel = false;
+                    root.scheduleFprintRearm(300);
+                }
+            }
+        }
+
+        function onReadyToLaunch() {"""),
+
+        # 8. flag writer + re-arm timer
+        ("""    Process {
+        id: greeterAutoLoginPendingProcess""",
+         """    Process { // dms-greeter-auth-patch
+        id: skipFprintFlagProcess
+        running: false
+        command: ["sh", "-c", "mkdir -p \\"$(dirname \\"$1\\")\\" && : > \\"$1\\"", "sh", root.skipFprintFlagPath]
+        onExited: function (exitCode, exitStatus) {
+            const callback = root.afterSkipFprintFlag;
+            root.afterSkipFprintFlag = null;
+            if (callback)
+                callback();
+        }
+    }
+    Timer { // dms-greeter-auth-patch
+        id: fprintRearmTimer
+        repeat: false
+        onTriggered: {
+            if (!root.isPrimaryScreen || !root.fprintRearmWanted())
+                return;
+            if (Greetd.state === GreetdState.Inactive) {
+                root.externalAuthAutoStartedForUser = "";
+                root.maybeAutoStartExternalAuth();
+            } else if (GreeterState.pendingPasswordResponse) {
+                // parked at the password prompt: greetd is idle, cancel is instant
+                root.rearmFprintAfterCancel = true;
+                Greetd.cancelSession();
+            }
+        }
+    }
+    Process {
+        id: greeterAutoLoginPendingProcess"""),
+    ],
+    AUTHWIDGET: [
+        # 7. typing resets the idle budget; clearing the field re-arms
+        ("""                            GreeterState.passwordBuffer = text;
+                            if (!text || text.length === 0)
+                                GreeterState.passwordSubmitRequested = false;""",
+         """                            GreeterState.passwordBuffer = text;
+                            if (root.host)
+                                root.host.fprintIdleRearms = 0; // dms-greeter-auth-patch
+                            if (!text || text.length === 0) {
+                                GreeterState.passwordSubmitRequested = false;
+                                root.host?.scheduleFprintRearm(400);
+                            }"""),
+    ],
+}
+
+plans = []
+for rel, edits in EDITS.items():
+    path = os.path.join(SHELL_DIR, rel)
+    try:
+        with open(path) as f:
+            text = f.read()
+    except OSError as e:
+        sys.exit(f"{MARKER}: cannot read {path}: {e}; FAILED")
+    if MARKER in text:
+        sys.exit(10)
+    for i, (old, new) in enumerate(edits, 1):
+        if text.count(old) != 1:
+            sys.exit(f"{MARKER}: {rel} anchor {i} not found exactly once; FAILED")
+        text = text.replace(old, new)
+    plans.append((path, text))
+for path, text in plans:
+    with open(path, "w") as f:
+        f.write(text)
+    print(f"{MARKER}: applied to {path}")

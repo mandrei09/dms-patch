@@ -1,0 +1,48 @@
+#!/bin/sh
+# Rebuild /usr/local/share/dms-greeter-shell from the UI embedded in
+# /usr/bin/dms-greeter + dms-greeter-auth-patch. Run by apt (DPkg::Post-Invoke)
+# and by install.sh. A failed patch leaves no .built-for stamp, so
+# dms-greeter-launch falls back to the stock UI instead of breaking the login
+# screen.
+#
+# DMS 2.1 (2026-11-08) dropped the greeter (Modules/Greetd) from
+# /usr/share/quickshell/dms; the only copy is embedded in the dms-greeter
+# binary, which unpacks it to $XDG_RUNTIME_DIR/dms-greeter-shell/<rev> and
+# then execs `qs`. Run it with an empty environment and PATH pointing nowhere:
+# it extracts the tree, fails to find qs and exits -- no UI ever starts.
+set -u
+BIN=/usr/bin/dms-greeter
+UI=/usr/local/share/dms-greeter-shell
+PATCH=/usr/local/lib/dms-greeter-auth/dms-greeter-auth-patch
+[ -x "$BIN" ] || exit 0
+want="$(dpkg-query -W -f='${Version}' dms 2>/dev/null) $(dpkg-query -W -f='${Version}' dms-greeter 2>/dev/null)"
+sum=$(sha256sum "$PATCH" | cut -d' ' -f1)
+[ "$(cat "$UI/.built-for" 2>/dev/null)" = "$want" ] && [ "$(cat "$UI/.patch-sha" 2>/dev/null)" = "$sum" ] && exit 0
+
+work=$(mktemp -d) || exit 0
+trap 'chmod -R u+w "$work" 2>/dev/null; rm -rf -- "$work"' EXIT
+mkdir -m 700 "$work/run" "$work/home"
+/usr/bin/timeout 30 /usr/bin/env -i HOME="$work/home" XDG_RUNTIME_DIR="$work/run" PATH=/nonexistent \
+    "$BIN" run >/dev/null 2>&1
+src=$(find "$work/run/dms-greeter-shell" -mindepth 2 -maxdepth 2 -name shell.qml -not -path '*/.extract-*' 2>/dev/null | head -1)
+src=${src%/shell.qml}
+if [ -z "$src" ] || [ ! -f "$src/Modules/Greetd/GreeterContent.qml" ]; then
+    logger -t dms-greeter-ui-rebuild "could not extract the embedded greeter UI from $BIN; login screen uses the stock UI"
+    exit 0
+fi
+
+tmp="$UI.new"
+rm -rf -- "$tmp"
+cp -a "$src" "$tmp" || exit 0
+chmod -R u+w "$tmp"
+if python3 -I "$PATCH" "$tmp" >/dev/null; then
+    printf '%s\n' "$want" > "$tmp/.built-for"
+    printf '%s\n' "$sum" > "$tmp/.patch-sha"
+    logger -t dms-greeter-ui-rebuild "patched greeter UI built for $want"
+else
+    logger -t dms-greeter-ui-rebuild "dms-greeter-auth-patch FAILED for $want; login screen uses the stock UI"
+fi
+chmod -R a+rX,go-w "$tmp"
+rm -rf -- "$UI"
+mv -- "$tmp" "$UI"
+exit 0

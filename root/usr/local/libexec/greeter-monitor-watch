@@ -1,0 +1,69 @@
+#!/usr/bin/python3 -I
+"""Login-screen hotplug: laptop panel off while an external display is
+connected, back on when the last one goes. exec-once'd by dms-greeter-launch
+inside the greeter's Hyprland (the boot-time state is set in its config).
+
+"External connected" is read from /sys/class/drm -- the same test
+dms-greeter-launch does before the compositor starts -- NOT from
+`hyprctl monitors all`. Hyprland's list also holds its headless FALLBACK
+output while it starts up; counting that as an external screen switched the
+laptop panel off on undocked boots (no login screen at all, 2026-11-06)."""
+import glob, json, os, socket, subprocess, sys
+
+INTERNAL = "eDP-1"
+INTERNAL_ON = "eDP-1,1920x1080@60,0x0,1.25"   # as in /etc/greetd/dms-hyprland.conf
+NOT_EXTERNAL = ("eDP-", "LVDS-", "DSI-", "Writeback-")
+
+
+def external_connected():
+    for s in glob.glob("/sys/class/drm/card*-*/status"):
+        conn = os.path.basename(os.path.dirname(s)).split("-", 1)[1]
+        if conn.startswith(NOT_EXTERNAL):
+            continue
+        try:
+            with open(s) as f:
+                if f.read().strip() == "connected":
+                    return True
+        except OSError:
+            pass
+    return False
+
+
+def hyprctl(*a):
+    return subprocess.run(["hyprctl", *a], capture_output=True, text=True).stdout
+
+
+def apply():
+    try:
+        mons = json.loads(hyprctl("monitors", "all", "-j"))
+    except json.JSONDecodeError:
+        return
+    internal = [m for m in mons if m["name"] == INTERNAL]
+    internal_on = any(not m.get("disabled") for m in internal)
+    if external_connected():
+        # only switch the panel off once Hyprland actually drives another
+        # real output, so the login UI always has somewhere to be
+        others = [m for m in mons if m["name"] != INTERNAL and not m.get("disabled")
+                  and m["name"] != "FALLBACK" and not m["name"].startswith("HEADLESS-")]
+        if internal_on and others:
+            hyprctl("keyword", "monitor", f"{INTERNAL},disable")
+    elif not internal_on:
+        hyprctl("keyword", "monitor", INTERNAL_ON)
+
+
+sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
+if not sig:
+    sys.exit(0)
+rt = os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+s = socket.socket(socket.AF_UNIX)
+s.connect(f"{rt}/hypr/{sig}/.socket2.sock")
+apply()
+buf = b""
+while True:
+    data = s.recv(4096)
+    if not data:
+        break
+    buf += data
+    *lines, buf = buf.split(b"\n")
+    if any(l.startswith((b"monitoradded", b"monitorremoved")) for l in lines):
+        apply()

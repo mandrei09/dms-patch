@@ -1,0 +1,7 @@
+#!/bin/sh
+# Hyprland session for greetd: send start-hyprland's output to the journal
+# (identifier: hyprland-session) so it doesn't print over the login VT.
+# First set ~/.config/hypr/docked.conf from the real connectors, so an
+# undocked login never starts with the laptop panel disabled.
+[ -x "$HOME/.local/bin/hypr-docked-sync" ] && "$HOME/.local/bin/hypr-docked-sync"
+exec systemd-cat -t hyprland-session /usr/bin/start-hyprland "$@"

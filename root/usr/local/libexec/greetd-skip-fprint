@@ -1,0 +1,11 @@
+#!/bin/sh
+# pam_exec helper, first auth line of /etc/pam.d/greetd (installed by
+# dms-patch: install.sh --root). Exit 0 = skip pam_fprintd.
+# The patched DMS greeter touches the flag right before a password-driven
+# session, so a typed password never waits out the fingerprint timeout.
+# Worst case of a forged flag: PAM asks for the password. Nothing else.
+f=/var/cache/dms-greeter/.local/state/skip-fprint
+[ -f "$f" ] && [ ! -L "$f" ] || exit 1
+age=$(( $(date +%s) - $(stat -c %Y -- "$f") ))
+rm -f -- "$f"
+[ "$age" -ge 0 ] && [ "$age" -le 15 ]
