@@ -10,8 +10,10 @@
 - Files under `root/` are copies. Edit them here, then run `./install.sh --root`
   (needs pkexec; ask the user to run it when no polkit agent is reachable). Never edit
   `/usr/local` or `/etc` in place.
+- Supports Debian/Ubuntu AND Arch: distro-specific root files go in root.debian/ or
+  root.arch/, packages in BOTH deps/ lists, package queries through lib/pkg.sh.
 - After adding something, also update the `dms-shell-sync` patch loop,
-  `dms-update-check` (`OWN_FILES_RE`, scan lists), `deps.txt` and README.md as needed.
+  `dms-update-check` (`OWN_FILES_RE`, scan lists), `deps/*.txt` and README.md as needed.
   Run `./install.sh --check` and commit.
 - The repo is PUBLIC. No hostnames, IPs, emails, tokens or private paths in files or
   commit messages. Use `$HOME`, not `/home/<user>`.
