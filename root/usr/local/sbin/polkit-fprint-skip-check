@@ -1,0 +1,15 @@
+#!/bin/sh
+# pam_exec helper for /etc/pam.d/polkit-1 (installed to /usr/local/sbin).
+# Exit 0 = skip pam_fprintd and go straight to the password.
+#
+# The DMS polkit dialog touches /run/polkit-fprint-skip/<uid> as soon as you
+# start typing while the fingerprint step is still running. Only a fresh
+# (<=120 s), regular file owned by that uid counts, so a stale flag left by a
+# crashed shell can never switch fingerprint off for good. Skipping only
+# removes a factor choice: the password is still required.
+uid=$(id -u -- "$PAM_USER" 2>/dev/null) || exit 1
+f=/run/polkit-fprint-skip/$uid
+[ -f "$f" ] && [ ! -L "$f" ] || exit 1
+[ "$(stat -c %u -- "$f")" = "$uid" ] || exit 1
+age=$(( $(date +%s) - $(stat -c %Y -- "$f") ))
+[ "$age" -ge -2 ] && [ "$age" -le 120 ]

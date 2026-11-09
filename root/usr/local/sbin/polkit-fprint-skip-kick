@@ -1,0 +1,69 @@
+#!/usr/bin/python3 -I
+"""Stop the polkit agent helper that is sitting in pam_fprintd once its user
+started typing (installed to /usr/local/sbin, run by polkit-fprint-skip.path).
+
+The DMS dialog touches /run/polkit-fprint-skip/<uid>. Killing the helper ends
+that PAM session; the agent (Quickshell) immediately starts a new one, and
+polkit-fprint-skip-check makes the new one skip pam_fprintd, so the password
+prompt appears at once. Only helpers whose socket peer is that uid
+(instance name ends in -<uid>) and that started BEFORE the flag was touched are
+stopped, so the fresh session that is waiting for the password is never hit.
+"""
+import os
+import stat
+import subprocess
+import time
+
+DIR = "/run/polkit-fprint-skip"
+
+
+def boot_time():
+    with open("/proc/stat") as f:
+        for line in f:
+            if line.startswith("btime "):
+                return int(line.split()[1])
+    raise RuntimeError("no btime")
+
+
+def start_time(pid, btime, tck):
+    with open(f"/proc/{pid}/stat") as f:
+        rest = f.read().rsplit(")", 1)[1].split()
+    return btime + int(rest[19]) / tck  # field 22 = starttime
+
+
+def main():
+    btime, tck, now = boot_time(), os.sysconf("SC_CLK_TCK"), time.time()
+    try:
+        entries = list(os.scandir(DIR))
+    except FileNotFoundError:
+        return
+    for e in entries:
+        if not e.name.isdigit():
+            continue
+        st = os.lstat(e.path)
+        uid = int(e.name)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != uid:
+            continue
+        if not (-1 <= now - st.st_mtime <= 10):
+            continue
+        out = subprocess.run(
+            ["systemctl", "list-units", "--all", "--plain", "--no-legend",
+             f"polkit-agent-helper@*-{uid}.service"],
+            capture_output=True, text=True).stdout
+        for line in out.splitlines():
+            unit = line.split()[0]
+            pid = subprocess.run(["systemctl", "show", "-P", "MainPID", unit],
+                                 capture_output=True, text=True).stdout.strip()
+            if not pid.isdigit() or pid == "0":
+                continue
+            try:
+                started = start_time(pid, btime, tck)
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            if started < st.st_mtime:
+                print(f"stopping {unit} (uid {uid} switched to the keyboard)")
+                subprocess.run(["systemctl", "stop", "--no-block", unit])
+
+
+if __name__ == "__main__":
+    main()

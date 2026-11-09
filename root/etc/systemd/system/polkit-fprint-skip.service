@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop a polkit helper waiting on the fingerprint reader
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/polkit-fprint-skip-kick

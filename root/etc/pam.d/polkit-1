@@ -1,0 +1,18 @@
+#%PAM-1.0
+# Polkit prompts (pkexec, DMS dialogs): fingerprint first, up to 3 tries, 10s per try,
+# then password. A password typed earlier in the DMS dialog is submitted as soon as the
+# fingerprint step ends. No enrolled fingerprint -> straight to password.
+# Typing in the DMS dialog while the fingerprint step runs ends it at once: the dialog
+# touches /run/polkit-fprint-skip/<uid>, polkit-fprint-skip.path stops the waiting helper,
+# and the retry skips pam_fprintd (line 1). See docs/polkit-fprint-skip.md in dms-patch.
+# Overrides /usr/lib/pam.d/polkit-1; delete this file to go back to stock behaviour.
+auth	[success=1 default=ignore]	pam_exec.so quiet /usr/local/sbin/polkit-fprint-skip-check
+auth	[success=2 default=ignore]	pam_fprintd.so max-tries=3 timeout=10
+auth	[success=1 default=ignore]	pam_unix.so nullok try_first_pass
+auth	requisite			pam_deny.so
+auth	required			pam_permit.so
+auth	optional			pam_cap.so
+@include common-account
+@include common-password
+session       required   pam_env.so readenv=1 user_readenv=0
+@include common-session-noninteractive

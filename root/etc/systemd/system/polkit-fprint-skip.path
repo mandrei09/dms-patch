@@ -1,0 +1,11 @@
+[Unit]
+Description=Let the keyboard take over from the fingerprint reader in polkit prompts
+Documentation=https://github.com/mandrei09/dms-patch/blob/main/docs/polkit-fprint-skip.md
+
+[Path]
+PathChanged=/run/polkit-fprint-skip
+MakeDirectory=yes
+DirectoryMode=1777
+
+[Install]
+WantedBy=paths.target
