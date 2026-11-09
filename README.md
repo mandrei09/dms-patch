@@ -13,8 +13,8 @@ that repo's `hyprland-session.target`.
 ## Quick start
 
 ```sh
-git clone https://github.com/mandrei09/dms-patch.git ~/dms-patch
-cd ~/dms-patch
+git clone https://github.com/mandrei09/dms-patch.git ~/.local/src/dms-patch
+cd ~/.local/src/dms-patch
 ./install.sh --deps     # packages from deps/<distro>.txt (apt, or pacman + paru/yay)
 ./install.sh            # link home/ into $HOME
 ./install.sh --root     # copy root/ (+ root.<distro>/) into / via pkexec, diff + confirm per file
