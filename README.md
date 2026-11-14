@@ -74,6 +74,7 @@ feature runs stock.
 | `dms-lock-notif-filter-patch` | Lock screen shows only critical notifications and those from apps in `~/.config/dms/lock-notifications-allow` |
 | `dms-hyprconf-input-patch` | Mouse/touchpad settings written as hyprlang `hypr/dms/input.conf`. Only needed while Hyprland < 0.57 (Ubuntu); 0.57+ reads DMS's Lua directly |
 | `dms-polkit-fprint-skip-patch` | Typing in the polkit dialog skips the fingerprint step ([docs](docs/polkit-fprint-skip.md)) |
+| `dms-hypr-legacy-dispatch-patch` | Workspace/window clicks work on a hyprlang (pre-Lua, <0.55) Hyprland: DMS 2.1 only sends Lua dispatches |
 
 **Helpers:**
 - `dms-launcher-action`, `dms-file-details`, `dms-app-details`: launcher actions and the details pane.

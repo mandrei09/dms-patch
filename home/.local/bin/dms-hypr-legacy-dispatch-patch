@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""Make DMS 2.1 drive a hyprlang (pre-Lua) Hyprland again.
+
+Symptom (2026-11-14, right after the dms 2.0.0 -> 2.1.1 update): clicking a
+workspace in the bar, or a window in the overview/taskbar, does nothing. The
+journal fills with
+    Dispatch request "hl.dsp.focus({ workspace = 2 })" failed with error
+    "Invalid dispatcher"
+
+Two causes, both in Services/HyprlandService.qml:
+
+1. Wrong Lua detection. When `j/status` doesn't say usingLua, DMS 2.1 falls
+   back to "does ~/.config/hypr/hyprland.lua exist?". That file is in the
+   shared dotfiles for the Arch port (Hyprland 0.57, Lua-only), but Hyprland
+   0.53 here ignores it and doesn't even know `status` ("unknown request").
+   Patched probe: the file must exist AND Hyprland must answer `status`.
+
+2. No hyprlang path at all. Every dispatch helper (focusWorkspace,
+   focusWindow, moveToWorkspace, ...) starts with `if (!luaConfigActive)
+   return;`, so even with correct detection it would silently do nothing.
+   Patched: each helper sends the classic dispatcher when Lua is off.
+
+Drop this patch once this machine runs a Lua-capable Hyprland (>= 0.55).
+
+Usage: dms-hypr-legacy-dispatch-patch [shell-dir]  (default: ~/.local/share/dms-shell)
+Idempotent: exit 10 means it was already in place.
+"""
+
+import os
+import sys
+
+SHELL_DIR = (sys.argv[1] if len(sys.argv) > 1
+             else os.path.expanduser("~/.local/share/dms-shell"))
+TARGET = os.path.join(SHELL_DIR, "Services/HyprlandService.qml")
+
+MARKER = "dms-hypr-legacy-dispatch-patch"
+
+GUARD = "        if (!luaConfigActive)\n            return;\n"
+
+# function header (exact) -> hyprlang body run when Lua is not active
+LEGACY = {
+    "function renameWorkspace(newName) {": '''\
+            const ws = Hyprland.focusedWorkspace;
+            if (ws && ws.id > 0)
+                Hyprland.dispatch(`renameworkspace ${ws.id} ${ws.id} ${newName}`);''',
+    "function focusWorkspace(workspace) {": '''\
+            Hyprland.dispatch(`workspace ${workspace}`);''',
+    "function focusWindow(windowAddress) {": '''\
+            const sel = windowSelector(windowAddress);
+            if (sel)
+                Hyprland.dispatch(`focuswindow ${sel}`);''',
+    "function closeWindow(windowAddress) {": '''\
+            const sel = windowSelector(windowAddress);
+            if (sel)
+                Hyprland.dispatch(`closewindow ${sel}`);''',
+    "function moveToWorkspace(workspace, windowAddress, follow = true) {": '''\
+            const sel = windowSelector(windowAddress);
+            if (sel)
+                Hyprland.dispatch(`${follow ? "movetoworkspace" : "movetoworkspacesilent"} ${workspace},${sel}`);''',
+    "function cycleWindow(forward) {": '''\
+            Hyprland.dispatch(forward ? "cyclenext" : "cyclenext prev");''',
+    "function focusMonitor(monitor) {": '''\
+            Hyprland.dispatch(`focusmonitor ${monitor}`);''',
+    "function moveWorkspaceToMonitor(workspace, monitor) {": '''\
+            Hyprland.dispatch(`moveworkspacetomonitor ${workspace} ${monitor}`);''',
+    "function toggleSpecial(specialName) {": '''\
+            Hyprland.dispatch(specialName ? `togglespecialworkspace ${specialName}` : "togglespecialworkspace");''',
+    "function exit() {": '''\
+            Hyprland.dispatch("exit");''',
+    "function dpmsOff() {": '''\
+            Hyprland.dispatch("dpms off");''',
+    "function dpmsOn() {": '''\
+            Hyprland.dispatch("dpms on");''',
+}
+
+PROBE_OLD = '''Proc.runCommand("hypr-lua-config-status", ["test", "-f", configDir + "/hypr/hyprland.lua"], '''
+PROBE_NEW = ('''Proc.runCommand("hypr-lua-config-status", ["sh", "-c", '''
+             '''"test -f \\"$1\\" && ! hyprctl -j status 2>&1 | grep -q \\"unknown request\\"", '''
+             '''"sh", configDir + "/hypr/hyprland.lua"], ''')
+
+
+def fail(msg):
+    print(f"{MARKER}: {msg} in {TARGET} (DMS changed upstream?)", file=sys.stderr)
+    return 1
+
+
+def main():
+    with open(TARGET) as f:
+        src = f.read()
+    if MARKER in src:
+        return 10
+
+    if src.count(PROBE_OLD) != 1:
+        return fail("Lua config probe not found")
+    src = src.replace(PROBE_OLD, PROBE_NEW)
+
+    for header, body in LEGACY.items():
+        old = f"    {header}\n{GUARD}"
+        if src.count(old) != 1:
+            return fail(f"guard for `{header}` not found")
+        new = (f"    {header}\n"
+               "        if (!luaConfigActive) {\n"
+               f"{body}\n"
+               "            return;\n"
+               "        }\n")
+        src = src.replace(old, new)
+
+    # Every remaining hl.dsp dispatch must now sit behind a patched guard.
+    if src.count(GUARD):
+        return fail("unpatched `if (!luaConfigActive) return;` guard left")
+
+    src = src.replace(
+        "    function focusWorkspace(workspace) {\n",
+        f"    // Local patch (~/.local/bin/{MARKER}): hyprlang fallbacks below.\n"
+        "    function focusWorkspace(workspace) {\n", 1)
+
+    with open(TARGET, "w") as f:
+        f.write(src)
+    print(f"{MARKER}: patched {TARGET}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

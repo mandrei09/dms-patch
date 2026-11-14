@@ -118,7 +118,7 @@ fi
 # Deprecation notices are reported separately (they only matter when they
 # name something our own files use).
 # Files the local patches touch or install, plus local plugins.
-OWN_FILES_RE='LauncherDetailsPane|LauncherExtraActions|ItemTransformers|DLauncherV2/Controller|LauncherContent|SpotlightLauncherContent|LauncherContextMenu|DContextMenu|DLauncherV2ModalHost|LauncherTab|SessionData|DgopService|CompositorService|LockNotificationsWidget|NotificationService|PolkitService|PolkitAuthContent|plugins/'
+OWN_FILES_RE='LauncherDetailsPane|LauncherExtraActions|ItemTransformers|DLauncherV2/Controller|LauncherContent|SpotlightLauncherContent|LauncherContextMenu|DContextMenu|DLauncherV2ModalHost|LauncherTab|SessionData|DgopService|CompositorService|HyprlandService|LockNotificationsWidget|NotificationService|PolkitService|PolkitAuthContent|plugins/'
 for unit in dms snip altswitcher; do
     st=$(systemctl --user show "$unit.service" -p ActiveEnterTimestamp --value)
     [ -z "$st" ] || [ "$st" = "n/a" ] && continue
